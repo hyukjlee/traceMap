@@ -518,7 +518,7 @@ def create_visualization(trace_path1, trace_path2, gpu_name_a="GPU_A", gpu_name_
     
     # Create layouts for each tab
     gpu_a_layout = column(
-        Div(text=f"<h2>{gpu_name_a} GPU Kernel Analysis</h2>"),
+        Div(text=f"<h2>{gpu_name_a} Kernel Analysis</h2>"),
         row(window_size_spinner, slider_gpu_a),
         chart_gpu_a,
         Div(text="<h3>Kernel Details Table</h3>"),
@@ -530,7 +530,7 @@ def create_visualization(trace_path1, trace_path2, gpu_name_a="GPU_A", gpu_name_
     )
     
     gpu_b_layout = column(
-        Div(text=f"<h2>{gpu_name_b} GPU Kernel Analysis</h2>"),
+        Div(text=f"<h2>{gpu_name_b} Kernel Analysis</h2>"),
         row(window_size_spinner, slider_gpu_b),
         chart_gpu_b,
         Div(text="<h3>Kernel Details Table</h3>"),
@@ -595,7 +595,7 @@ def main():
     
     # Create and save the visualization
     output_file(args.output, title="GPU Kernel Profiling Dashboard")
-    layout = create_visualization(args.trace1, args.trace2, args.gpu_a, args.gpu_b)
+    layout = create_visualization(args.trace1, args.trace2, args.name1, args.name2)
     save(layout)
     print(f"Dashboard saved to {args.output}")
 

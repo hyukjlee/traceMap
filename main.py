@@ -580,9 +580,9 @@ def create_visualization(trace_path1, trace_path2, gpu_name_a="GPU_A", gpu_name_
 
 def main():
     parser = argparse.ArgumentParser(description='Generate GPU Kernel Profiling Dashboard')
-    parser.add_argument('--trace1', default="./trace_file/examples/1_h100_1000isl_10osl_32con.pt.trace.json.gz", 
+    parser.add_argument('--trace1', default="./trace_file/examples/trace1.pt.trace.json.gz", 
                        help='Path to first trace file')
-    parser.add_argument('--trace2', default="./trace_file/examples/1_mi300x_1000isl_10osl_32con.pt.trace.json.gz",
+    parser.add_argument('--trace2', default="./trace_file/examples/trace2.pt.trace.json.gz",
                        help='Path to second trace file')
     parser.add_argument('--name1', default="Trace_A", 
                        help='Name for first trace (default: Trace_A)')

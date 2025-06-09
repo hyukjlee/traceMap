@@ -584,9 +584,9 @@ def main():
                        help='Path to first trace file')
     parser.add_argument('--trace2', default="./trace_file/examples/1_mi300x_1000isl_10osl_32con.pt.trace.json.gz",
                        help='Path to second trace file')
-    parser.add_argument('--gpu-a', default="Trace_A", 
+    parser.add_argument('--name1', default="Trace_A", 
                        help='Name for first trace (default: Trace_A)')
-    parser.add_argument('--gpu-b', default="Trace_B", 
+    parser.add_argument('--name2', default="Trace_B", 
                        help='Name for second trace (default: Trace_B)')
     parser.add_argument('--output', default="gpu_trace_profiling.html",
                        help='Output HTML file name (default: gpu_trace_profiling.html)')

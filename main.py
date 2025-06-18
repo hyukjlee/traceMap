@@ -7,11 +7,15 @@ from bokeh.plotting import figure, save, output_file
 from bokeh.layouts import column, row
 from bokeh.models import (
     ColumnDataSource, DataTable, TableColumn, Slider, 
+    LinearColorMapper, ColorBar, CategoricalColorMapper, 
     CustomJS, Div, Select, NumberFormatter, Tabs, TabPanel,
-    Spinner, Button, TextAreaInput, TextInput
+    Spinner, Button, TextAreaInput, TextInput, CheckboxGroup
 )
 from bokeh.io import curdoc
 from collections import Counter
+from bokeh.palettes import Category20, Set3, Spectral11, Turbo256
+from bokeh.transform import transform
+import hashlib
 
 
 class TraceAnalyzer:
@@ -46,9 +50,48 @@ class TraceAnalyzer:
                 "Duration (us)": round(duration, 3),
                 "End (us)": round(end - base_time, 3),
             } for idx, (name, start, duration, end) in enumerate(kernel_events)]
-            return pd.DataFrame(parsed)
+            df = pd.DataFrame(parsed)
+            
+            # Add color mapping for kernels
+            df = self._add_kernel_colors(df)
+            return df
         else:
-            return pd.DataFrame(columns=["Kernel Index", "Kernel Name", "Start (us)", "Duration (us)", "End (us)"])
+            return pd.DataFrame(columns=["Kernel Index", "Kernel Name", "Start (us)", "Duration (us)", "End (us)", "Color"])
+    
+    def _add_kernel_colors(self, df):
+        """Add consistent color mapping for each unique kernel name"""
+        unique_kernels = df['Kernel Name'].unique()
+        
+        # Create a larger color palette by combining multiple palettes
+        colors = []
+        colors.extend(Category20[20])
+        colors.extend(Set3[12])
+        colors.extend(Spectral11)
+        
+        # If we need more colors, generate them using hash
+        while len(colors) < len(unique_kernels):
+            colors.extend(Turbo256[::8])  # Take every 8th color from Turbo256
+        
+        # Create color mapping
+        color_map = {}
+        for i, kernel in enumerate(unique_kernels):
+            if i < len(colors):
+                color_map[kernel] = colors[i]
+            else:
+                # Generate color from hash if we run out of predefined colors
+                hash_color = self._hash_to_color(kernel)
+                color_map[kernel] = hash_color
+        
+        # Add color column
+        df['Color'] = df['Kernel Name'].map(color_map)
+        return df
+    
+    def _hash_to_color(self, text):
+        """Generate a consistent color from text hash"""
+        hash_obj = hashlib.md5(text.encode())
+        hash_hex = hash_obj.hexdigest()
+        # Take first 6 characters as RGB hex color
+        return f"#{hash_hex[:6]}"
     
     def create_top_n_data(self, n=10):
         """Create top N kernels by total latency and counts"""
@@ -64,49 +107,6 @@ class TraceAnalyzer:
         return self.df.sort_values('Duration (us)', ascending=False).reset_index(drop=True)
 
 
-class DataSourceManager:
-    """Class to manage Bokeh data sources"""
-    
-    def __init__(self, trace_analyzer_a, trace_analyzer_b, default_window_size=100):
-        self.trace_a = trace_analyzer_a
-        self.trace_b = trace_analyzer_b
-        self.window_size = default_window_size
-        self._create_data_sources()
-    
-    def _create_data_sources(self):
-        """Create all necessary data sources"""
-        # Main data sources
-        self.source_gpu_a = ColumnDataSource(self.trace_a.df)
-        self.source_gpu_b = ColumnDataSource(self.trace_b.df)
-        
-        # Filtered sources for sliding window
-        self.source_gpu_a_filtered = ColumnDataSource(self.trace_a.df.head(self.window_size))
-        self.source_gpu_b_filtered = ColumnDataSource(self.trace_b.df.head(self.window_size))
-        
-        # Sorted filtered sources
-        initial_gpu_a_sorted = self.trace_a.df.head(self.window_size).sort_values('Duration (us)', ascending=False).reset_index(drop=True)
-        initial_gpu_b_sorted = self.trace_b.df.head(self.window_size).sort_values('Duration (us)', ascending=False).reset_index(drop=True)
-        
-        self.source_sorted_gpu_a_filtered = ColumnDataSource(initial_gpu_a_sorted)
-        self.source_sorted_gpu_b_filtered = ColumnDataSource(initial_gpu_b_sorted)
-        
-        # Combined view sources
-        self.source_gpu_a_combined_filtered = ColumnDataSource(self.trace_a.df.head(self.window_size))
-        self.source_gpu_b_combined_filtered = ColumnDataSource(self.trace_b.df.head(self.window_size))
-        
-        self.source_sorted_gpu_a_combined_filtered = ColumnDataSource(initial_gpu_a_sorted)
-        self.source_sorted_gpu_b_combined_filtered = ColumnDataSource(initial_gpu_b_sorted)
-        
-        # Top N data sources
-        self.source_top_gpu_a = ColumnDataSource(self.trace_a.create_top_n_data())
-        self.source_top_gpu_b = ColumnDataSource(self.trace_b.create_top_n_data())
-        
-        combined_df = pd.concat([self.trace_a.df, self.trace_b.df], ignore_index=True)
-        combined_analyzer = TraceAnalyzer.__new__(TraceAnalyzer)
-        combined_analyzer.df = combined_df
-        self.source_top_both = ColumnDataSource(combined_analyzer.create_top_n_data())
-
-
 class ChartManager:
     """Class to manage chart creation and interactions"""
     
@@ -116,9 +116,12 @@ class ChartManager:
         self.gpu_name_b = gpu_name_b
         self.charts = {}
         self.bars = {}
+        self.timeline_charts = {}
+        self.timeline_bars = {}
         self._create_charts()
+        self._create_timeline_charts()
     
-    def _create_bar_chart(self, title, source_filtered, color, width=800):
+    def _create_bar_chart(self, title, source_filtered, color, width=1000):
         """Create a bar chart"""
         p = figure(
             title=title,
@@ -132,8 +135,31 @@ class ChartManager:
                      source=source_filtered, color=color, alpha=0.7)
         return p, bars
     
+    def _create_timeline_chart(self, title, source_filtered, color, width=1000):
+        """Create a timeline chart showing kernel execution over time"""
+        p = figure(
+            title=title,
+            x_axis_label="Time (us)",
+            width=width,
+            height=400,  # Much shorter height since no y-axis
+            tools="pan,wheel_zoom,box_zoom,reset,save,tap",
+            y_range=(0, 1)  # Fixed small y-range
+        )
+        
+        # Hide y-axis
+        p.yaxis.visible = False
+        p.ygrid.visible = False
+        
+        # Create horizontal bars showing kernel execution timeline
+        # Use a fixed height and position for all kernels
+        bars = p.quad(left='Start (us)', right='End (us)', 
+                     bottom=0.1, top=0.9,  # Fixed positions
+                     source=source_filtered, color='Color', alpha=0.8)
+        
+        return p, bars
+    
     def _create_charts(self):
-        """Create all charts"""
+        """Create all bar charts"""
         # Individual GPU charts
         self.charts['gpu_a'], self.bars['gpu_a'] = self._create_bar_chart(
             f"{self.gpu_name_a} Kernel Latency", self.ds.source_gpu_a_filtered, "blue", width=2000)
@@ -147,6 +173,78 @@ class ChartManager:
         
         self.charts['gpu_b_combined'], self.bars['gpu_b_combined'] = self._create_bar_chart(
             f"{self.gpu_name_b} Kernel Latency", self.ds.source_gpu_b_combined_filtered, "red", width=1000)
+    
+    def _create_timeline_charts(self):
+        """Create all timeline charts"""
+        # Individual GPU timeline charts
+        self.timeline_charts['gpu_a'], self.timeline_bars['gpu_a'] = self._create_timeline_chart(
+            f"{self.gpu_name_a} Kernel Timeline", self.ds.source_gpu_a_filtered, "blue", width=2000)
+        
+        self.timeline_charts['gpu_b'], self.timeline_bars['gpu_b'] = self._create_timeline_chart(
+            f"{self.gpu_name_b} Kernel Timeline", self.ds.source_gpu_b_filtered, "red", width=2000)
+        
+        # Combined view timeline charts
+        self.timeline_charts['gpu_a_combined'], self.timeline_bars['gpu_a_combined'] = self._create_timeline_chart(
+            f"{self.gpu_name_a} Kernel Timeline", self.ds.source_gpu_a_combined_filtered, "blue", width=1000)
+        
+        self.timeline_charts['gpu_b_combined'], self.timeline_bars['gpu_b_combined'] = self._create_timeline_chart(
+            f"{self.gpu_name_b} Kernel Timeline", self.ds.source_gpu_b_combined_filtered, "red", width=1000)
+
+
+class DataSourceManager:
+    """Class to manage Bokeh data sources"""
+    
+    def __init__(self, trace_analyzer_a, trace_analyzer_b, default_window_size=100):
+        self.trace_a = trace_analyzer_a
+        self.trace_b = trace_analyzer_b
+        self.window_size = default_window_size
+        self._create_data_sources()
+    
+    def _add_timeline_data(self, df):
+        """Add data needed for timeline visualization"""
+        df_copy = df.copy()
+        # No longer need kernel_top since we're not using y-axis positioning
+        return df_copy
+    
+    def _create_data_sources(self):
+        """Create all necessary data sources"""
+        # Add timeline data to dataframes
+        trace_a_timeline = self._add_timeline_data(self.trace_a.df)
+        trace_b_timeline = self._add_timeline_data(self.trace_b.df)
+        
+        # Main data sources
+        self.source_gpu_a = ColumnDataSource(trace_a_timeline)
+        self.source_gpu_b = ColumnDataSource(trace_b_timeline)
+        
+        # Filtered sources for sliding window
+        self.source_gpu_a_filtered = ColumnDataSource(trace_a_timeline.head(self.window_size))
+        self.source_gpu_b_filtered = ColumnDataSource(trace_b_timeline.head(self.window_size))
+        
+        # Sorted filtered sources
+        initial_gpu_a_sorted = trace_a_timeline.head(self.window_size).sort_values('Duration (us)', ascending=False).reset_index(drop=True)
+        initial_gpu_a_sorted = self._add_timeline_data(initial_gpu_a_sorted)
+        
+        initial_gpu_b_sorted = trace_b_timeline.head(self.window_size).sort_values('Duration (us)', ascending=False).reset_index(drop=True)
+        initial_gpu_b_sorted = self._add_timeline_data(initial_gpu_b_sorted)
+        
+        self.source_sorted_gpu_a_filtered = ColumnDataSource(initial_gpu_a_sorted)
+        self.source_sorted_gpu_b_filtered = ColumnDataSource(initial_gpu_b_sorted)
+        
+        # Combined view sources
+        self.source_gpu_a_combined_filtered = ColumnDataSource(trace_a_timeline.head(self.window_size))
+        self.source_gpu_b_combined_filtered = ColumnDataSource(trace_b_timeline.head(self.window_size))
+        
+        self.source_sorted_gpu_a_combined_filtered = ColumnDataSource(initial_gpu_a_sorted)
+        self.source_sorted_gpu_b_combined_filtered = ColumnDataSource(initial_gpu_b_sorted)
+        
+        # Top N data sources
+        self.source_top_gpu_a = ColumnDataSource(self.trace_a.create_top_n_data())
+        self.source_top_gpu_b = ColumnDataSource(self.trace_b.create_top_n_data())
+        
+        combined_df = pd.concat([self.trace_a.df, self.trace_b.df], ignore_index=True)
+        combined_analyzer = TraceAnalyzer.__new__(TraceAnalyzer)
+        combined_analyzer.df = combined_df
+        self.source_top_both = ColumnDataSource(combined_analyzer.create_top_n_data())
 
 
 class ControlManager:
@@ -163,6 +261,17 @@ class ControlManager:
     
     def _create_controls(self):
         """Create UI controls"""
+        # Chart type selection
+        self.chart_type_select = Select(
+            title="Chart Type:", value="Bar Chart", 
+            options=["Bar Chart", "Timeline Chart"], width=150
+        )
+        
+        self.chart_type_select_combined = Select(
+            title="Chart Type:", value="Bar Chart", 
+            options=["Bar Chart", "Timeline Chart"], width=150
+        )
+        
         # Window size controls
         self.window_size_spinner = Spinner(
             title="Window Size:", low=10, high=1000, step=10, 
@@ -214,12 +323,21 @@ class ControlManager:
             for (let key in filtered_data) {
                 sorted_data[key] = indices.map(i => filtered_data[key][i]);
             }
+            
+            // Update Kernel Index for sorted data
+            for (let i = 0; i < sorted_data['Kernel Index'].length; i++) {
+                sorted_data['Kernel Index'][i] = i;
+            }
+            
             return sorted_data;
         }
         """
     
     def _setup_callbacks(self):
         """Setup JavaScript callbacks"""
+        # Chart type selection callbacks
+        self._setup_chart_type_callbacks()
+        
         # Window size callbacks
         window_size_callback = CustomJS(
             args=dict(
@@ -332,6 +450,63 @@ class ControlManager:
         
         # Slider callbacks
         self._setup_slider_callbacks()
+    
+    def _setup_chart_type_callbacks(self):
+        """Setup chart type selection callbacks"""
+        # Individual view chart type callback
+        chart_type_callback = CustomJS(
+            args=dict(
+                select=self.chart_type_select,
+                bar_chart_a=self.chart_manager.charts['gpu_a'],
+                timeline_chart_a=self.chart_manager.timeline_charts['gpu_a'],
+                bar_chart_b=self.chart_manager.charts['gpu_b'],
+                timeline_chart_b=self.chart_manager.timeline_charts['gpu_b']
+            ),
+            code="""
+            const chart_type = select.value;
+            
+            if (chart_type === "Bar Chart") {
+                bar_chart_a.visible = true;
+                timeline_chart_a.visible = false;
+                bar_chart_b.visible = true;
+                timeline_chart_b.visible = false;
+            } else {
+                bar_chart_a.visible = false;
+                timeline_chart_a.visible = true;
+                bar_chart_b.visible = false;
+                timeline_chart_b.visible = true;
+            }
+            """
+        )
+        
+        # Combined view chart type callback
+        chart_type_callback_combined = CustomJS(
+            args=dict(
+                select=self.chart_type_select_combined,
+                bar_chart_a=self.chart_manager.charts['gpu_a_combined'],
+                timeline_chart_a=self.chart_manager.timeline_charts['gpu_a_combined'],
+                bar_chart_b=self.chart_manager.charts['gpu_b_combined'],
+                timeline_chart_b=self.chart_manager.timeline_charts['gpu_b_combined']
+            ),
+            code="""
+            const chart_type = select.value;
+            
+            if (chart_type === "Bar Chart") {
+                bar_chart_a.visible = true;
+                timeline_chart_a.visible = false;
+                bar_chart_b.visible = true;
+                timeline_chart_b.visible = false;
+            } else {
+                bar_chart_a.visible = false;
+                timeline_chart_a.visible = true;
+                bar_chart_b.visible = false;
+                timeline_chart_b.visible = true;
+            }
+            """
+        )
+        
+        self.chart_type_select.js_on_change('value', chart_type_callback)
+        self.chart_type_select_combined.js_on_change('value', chart_type_callback_combined)
     
     def _setup_slider_callbacks(self):
         """Setup slider callbacks"""
@@ -910,7 +1085,7 @@ class TableManager:
     
     def _setup_table_interactions(self):
         """Setup table interaction callbacks"""
-        # Bar click callbacks to highlight table rows
+        # Bar click callbacks to highlight table rows for both bar and timeline charts
         tap_callback_gpu_a = CustomJS(
             args=dict(source=self.ds.source_gpu_a_filtered, 
                      table=self.tables['gpu_a'], 
@@ -980,11 +1155,17 @@ class TableManager:
             """
         )
         
-        # Attach callbacks
+        # Attach callbacks to both bar and timeline charts
         self.charts.bars['gpu_a'].data_source.selected.js_on_change('indices', tap_callback_gpu_a)
         self.charts.bars['gpu_b'].data_source.selected.js_on_change('indices', tap_callback_gpu_b)
         self.charts.bars['gpu_a_combined'].data_source.selected.js_on_change('indices', tap_callback_gpu_a_combined)
         self.charts.bars['gpu_b_combined'].data_source.selected.js_on_change('indices', tap_callback_gpu_b_combined)
+        
+        # Timeline chart callbacks
+        self.charts.timeline_bars['gpu_a'].data_source.selected.js_on_change('indices', tap_callback_gpu_a)
+        self.charts.timeline_bars['gpu_b'].data_source.selected.js_on_change('indices', tap_callback_gpu_b)
+        self.charts.timeline_bars['gpu_a_combined'].data_source.selected.js_on_change('indices', tap_callback_gpu_a_combined)
+        self.charts.timeline_bars['gpu_b_combined'].data_source.selected.js_on_change('indices', tap_callback_gpu_b_combined)
 
 
 class DashboardBuilder:
@@ -1003,16 +1184,26 @@ class DashboardBuilder:
         self.table_manager = TableManager(self.data_sources, self.control_manager, self.chart_manager)
         self.duration_calculator = KernelDurationCalculator(self.data_sources, gpu_name_a, gpu_name_b)
     
+    def _create_chart_container(self, charts, timeline_charts, key):
+        """Create a container that can show either bar or timeline chart"""
+        container = column(charts[key], timeline_charts[key])
+        # Initially show only bar chart
+        timeline_charts[key].visible = False
+        return container
+    
     def create_layout(self):
         """Create the complete dashboard layout"""
         # Create spacer div for left margin
         spacer = Div(text="", width=50, height=10)
         
         # GPU A layout with left spacing
+        gpu_a_chart_container = self._create_chart_container(
+            self.chart_manager.charts, self.chart_manager.timeline_charts, 'gpu_a')
+        
         gpu_a_layout = column(
             row(spacer, Div(text=f"<h2>{self.gpu_name_a} Kernel Analysis</h2>")),
-            row(spacer, self.control_manager.window_size_spinner, self.control_manager.slider_gpu_a),
-            row(spacer, self.chart_manager.charts['gpu_a']),
+            row(spacer, self.control_manager.chart_type_select, self.control_manager.window_size_spinner, self.control_manager.slider_gpu_a),
+            row(spacer, gpu_a_chart_container),
             row(spacer, Div(text="<h3>Kernel Details Table</h3>"), self.table_manager.copy_buttons['gpu_a']),
             row(spacer, self.table_manager.tables['gpu_a']),
             row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"), self.table_manager.copy_buttons['sorted_gpu_a']),
@@ -1026,10 +1217,13 @@ class DashboardBuilder:
         )
         
         # GPU B layout with left spacing
+        gpu_b_chart_container = self._create_chart_container(
+            self.chart_manager.charts, self.chart_manager.timeline_charts, 'gpu_b')
+        
         gpu_b_layout = column(
             row(spacer, Div(text=f"<h2>{self.gpu_name_b} Kernel Analysis</h2>")),
-            row(spacer, self.control_manager.window_size_spinner, self.control_manager.slider_gpu_b),
-            row(spacer, self.chart_manager.charts['gpu_b']),
+            row(spacer, self.control_manager.chart_type_select, self.control_manager.window_size_spinner, self.control_manager.slider_gpu_b),
+            row(spacer, gpu_b_chart_container),
             row(spacer, Div(text="<h3>Kernel Details Table</h3>"), self.table_manager.copy_buttons['gpu_b']),
             row(spacer, self.table_manager.tables['gpu_b']),
             row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"), self.table_manager.copy_buttons['sorted_gpu_b']),
@@ -1043,11 +1237,16 @@ class DashboardBuilder:
         )
         
         # Combined layout with left spacing
+        gpu_a_combined_container = self._create_chart_container(
+            self.chart_manager.charts, self.chart_manager.timeline_charts, 'gpu_a_combined')
+        gpu_b_combined_container = self._create_chart_container(
+            self.chart_manager.charts, self.chart_manager.timeline_charts, 'gpu_b_combined')
+        
         both_layout = column(
             row(spacer, Div(text="<h2>Side by Side Comparison</h2>")),        
-            row(spacer, self.control_manager.window_size_spinner_combined),
+            row(spacer, self.control_manager.chart_type_select_combined, self.control_manager.window_size_spinner_combined),
             row(spacer, self.control_manager.slider_gpu_a_combined, self.control_manager.slider_gpu_b_combined),
-            row(spacer, self.chart_manager.charts['gpu_a_combined'], self.chart_manager.charts['gpu_b_combined']),
+            row(spacer, gpu_a_combined_container, gpu_b_combined_container),
             row(spacer, Div(text="<h3>Kernel Details Tables</h3>")),
             row(spacer,
                 column(Div(text=f"<h4>{self.gpu_name_a} Kernels</h4>"), 

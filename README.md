@@ -48,8 +48,8 @@ python3 main.py \
 
 ### Command Line Arguments
 
-- `--trace1`: Path to first trace file (default: `./trace_file/1_h100_1000isl_10osl_32con.pt.trace.json.gz`)
-- `--trace2`: Path to second trace file (default: `./trace_file/1_mi300x_1000isl_10osl_32con.pt.trace.json.gz`)
+- `--trace1`: Path to first trace file (default: `./trace_file/examples/trace1.pt.trace.json.gz`)
+- `--trace2`: Path to second trace file (default: `./trace_file/examples/trace2.pt.trace.json.gz`)
 - `--name1`: Name for first trace (default: `Trace_A`)
 - `--name2`: Name for second trace (default: `Trace_B`)
 - `--output`: Output HTML file name (default: `gpu_trace_profiling.html`)

@@ -8,7 +8,7 @@ from bokeh.layouts import column, row
 from bokeh.models import (
     ColumnDataSource, DataTable, TableColumn, Slider, 
     CustomJS, Div, Select, NumberFormatter, Tabs, TabPanel,
-    Spinner
+    Spinner, Button, TextAreaInput, TextInput
 )
 from bokeh.io import curdoc
 from collections import Counter
@@ -447,6 +447,277 @@ class ControlManager:
         self.slider_gpu_b_combined.js_on_change('value', slider_callback_gpu_b_combined)
 
 
+class KernelDurationCalculator:
+    """Class to handle kernel duration calculations"""
+    
+    def __init__(self, data_sources, gpu_name_a="GPU_A", gpu_name_b="GPU_B"):
+        self.ds = data_sources
+        self.gpu_name_a = gpu_name_a
+        self.gpu_name_b = gpu_name_b
+        self._create_calculator_widgets()
+        self._setup_calculator_callbacks()
+    
+    def _create_calculator_widgets(self):
+        """Create calculator UI widgets"""
+        # Text input for kernel names
+        self.kernel_input_a = TextAreaInput(
+            value="", 
+            title=f"Paste {self.gpu_name_a} Kernel Names (one per line):",
+            rows=5, 
+            width=500,
+            placeholder="Paste kernel names here..."
+        )
+        
+        self.kernel_input_b = TextAreaInput(
+            value="", 
+            title=f"Paste {self.gpu_name_b} Kernel Names (one per line):",
+            rows=5, 
+            width=500,
+            placeholder="Paste kernel names here..."
+        )
+        
+        # Calculate buttons
+        self.calc_button_a = Button(label=f"Calculate {self.gpu_name_a} Total", button_type="success", width=200)
+        self.calc_button_b = Button(label=f"Calculate {self.gpu_name_b} Total", button_type="success", width=200)
+        
+        # Result displays
+        self.result_div_a = Div(text=f"<h4>{self.gpu_name_a} Results:</h4><p>Enter kernel names and click calculate</p>", width=500)
+        self.result_div_b = Div(text=f"<h4>{self.gpu_name_b} Results:</h4><p>Enter kernel names and click calculate</p>", width=500)
+        
+        # Combined calculator
+        self.kernel_input_combined = TextAreaInput(
+            value="", 
+            title="Paste Kernel Names (one per line) - will search both traces:",
+            rows=5, 
+            width=1000,
+            placeholder="Paste kernel names here..."
+        )
+        
+        self.calc_button_combined = Button(label="Calculate Both Traces", button_type="primary", width=200)
+        self.result_div_combined = Div(text="<h4>Combined Results:</h4><p>Enter kernel names and click calculate</p>", width=1000)
+    
+    def _setup_calculator_callbacks(self):
+        """Setup calculator callbacks"""
+        # GPU A calculator
+        calc_callback_a = CustomJS(
+            args=dict(
+                source=self.ds.source_gpu_a,
+                input_widget=self.kernel_input_a,
+                result_div=self.result_div_a,
+                gpu_name=self.gpu_name_a
+            ),
+            code="""
+            const kernel_names = input_widget.value.split('\\n').map(name => name.trim()).filter(name => name.length > 0);
+            
+            if (kernel_names.length === 0) {
+                result_div.text = `<h4>${gpu_name} Results:</h4><p style="color: red;">Please enter at least one kernel name</p>`;
+                return;
+            }
+            
+            const data = source.data;
+            let total_duration = 0;
+            let found_count = 0;
+            let results_html = `<h4>${gpu_name} Results:</h4>`;
+            
+            // Create a map for faster lookup
+            const kernel_durations = {};
+            for (let i = 0; i < data['Kernel Name'].length; i++) {
+                const name = data['Kernel Name'][i];
+                const duration = data['Duration (us)'][i];
+                if (kernel_durations[name]) {
+                    kernel_durations[name] += duration;
+                } else {
+                    kernel_durations[name] = duration;
+                }
+            }
+            
+            results_html += '<table style="border-collapse: collapse; width: 100%;">';
+            results_html += '<tr style="background-color: #f0f0f0;"><th style="border: 1px solid #ddd; padding: 8px;">Kernel Name</th><th style="border: 1px solid #ddd; padding: 8px;">Total Duration (μs)</th><th style="border: 1px solid #ddd; padding: 8px;">Status</th></tr>';
+            
+            for (let kernel_name of kernel_names) {
+                if (kernel_durations[kernel_name]) {
+                    const duration = kernel_durations[kernel_name].toFixed(3);
+                    total_duration += kernel_durations[kernel_name];
+                    found_count++;
+                    results_html += `<tr><td style="border: 1px solid #ddd; padding: 8px;">${kernel_name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${duration}</td><td style="border: 1px solid #ddd; padding: 8px; color: green;">Found</td></tr>`;
+                } else {
+                    results_html += `<tr><td style="border: 1px solid #ddd; padding: 8px;">${kernel_name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">0.000</td><td style="border: 1px solid #ddd; padding: 8px; color: red;">Not Found</td></tr>`;
+                }
+            }
+            
+            results_html += `<tr style="background-color: #e6f3ff; font-weight: bold;"><td style="border: 1px solid #ddd; padding: 8px;">TOTAL</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${total_duration.toFixed(3)}</td><td style="border: 1px solid #ddd; padding: 8px;">${found_count}/${kernel_names.length} found</td></tr>`;
+            results_html += '</table>';
+            
+            results_html += `<p><strong>Summary:</strong> Found ${found_count} out of ${kernel_names.length} kernels. Total duration: <strong>${total_duration.toFixed(3)} μs</strong></p>`;
+            
+            result_div.text = results_html;
+            """
+        )
+        
+        # GPU B calculator (similar)
+        calc_callback_b = CustomJS(
+            args=dict(
+                source=self.ds.source_gpu_b,
+                input_widget=self.kernel_input_b,
+                result_div=self.result_div_b,
+                gpu_name=self.gpu_name_b
+            ),
+            code="""
+            const kernel_names = input_widget.value.split('\\n').map(name => name.trim()).filter(name => name.length > 0);
+            
+            if (kernel_names.length === 0) {
+                result_div.text = `<h4>${gpu_name} Results:</h4><p style="color: red;">Please enter at least one kernel name</p>`;
+                return;
+            }
+            
+            const data = source.data;
+            let total_duration = 0;
+            let found_count = 0;
+            let results_html = `<h4>${gpu_name} Results:</h4>`;
+            
+            // Create a map for faster lookup
+            const kernel_durations = {};
+            for (let i = 0; i < data['Kernel Name'].length; i++) {
+                const name = data['Kernel Name'][i];
+                const duration = data['Duration (us)'][i];
+                if (kernel_durations[name]) {
+                    kernel_durations[name] += duration;
+                } else {
+                    kernel_durations[name] = duration;
+                }
+            }
+            
+            results_html += '<table style="border-collapse: collapse; width: 100%;">';
+            results_html += '<tr style="background-color: #f0f0f0;"><th style="border: 1px solid #ddd; padding: 8px;">Kernel Name</th><th style="border: 1px solid #ddd; padding: 8px;">Total Duration (μs)</th><th style="border: 1px solid #ddd; padding: 8px;">Status</th></tr>';
+            
+            for (let kernel_name of kernel_names) {
+                if (kernel_durations[kernel_name]) {
+                    const duration = kernel_durations[kernel_name].toFixed(3);
+                    total_duration += kernel_durations[kernel_name];
+                    found_count++;
+                    results_html += `<tr><td style="border: 1px solid #ddd; padding: 8px;">${kernel_name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${duration}</td><td style="border: 1px solid #ddd; padding: 8px; color: green;">Found</td></tr>`;
+                } else {
+                    results_html += `<tr><td style="border: 1px solid #ddd; padding: 8px;">${kernel_name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">0.000</td><td style="border: 1px solid #ddd; padding: 8px; color: red;">Not Found</td></tr>`;
+                }
+            }
+            
+            results_html += `<tr style="background-color: #e6f3ff; font-weight: bold;"><td style="border: 1px solid #ddd; padding: 8px;">TOTAL</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${total_duration.toFixed(3)}</td><td style="border: 1px solid #ddd; padding: 8px;">${found_count}/${kernel_names.length} found</td></tr>`;
+            results_html += '</table>';
+            
+            results_html += `<p><strong>Summary:</strong> Found ${found_count} out of ${kernel_names.length} kernels. Total duration: <strong>${total_duration.toFixed(3)} μs</strong></p>`;
+            
+            result_div.text = results_html;
+            """
+        )
+        
+        # Combined calculator
+        calc_callback_combined = CustomJS(
+            args=dict(
+                source_a=self.ds.source_gpu_a,
+                source_b=self.ds.source_gpu_b,
+                input_widget=self.kernel_input_combined,
+                result_div=self.result_div_combined,
+                gpu_name_a=self.gpu_name_a,
+                gpu_name_b=self.gpu_name_b
+            ),
+            code="""
+            const kernel_names = input_widget.value.split('\\n').map(name => name.trim()).filter(name => name.length > 0);
+            
+            if (kernel_names.length === 0) {
+                result_div.text = '<h4>Combined Results:</h4><p style="color: red;">Please enter at least one kernel name</p>';
+                return;
+            }
+            
+            // Process GPU A
+            const data_a = source_a.data;
+            const kernel_durations_a = {};
+            for (let i = 0; i < data_a['Kernel Name'].length; i++) {
+                const name = data_a['Kernel Name'][i];
+                const duration = data_a['Duration (us)'][i];
+                if (kernel_durations_a[name]) {
+                    kernel_durations_a[name] += duration;
+                } else {
+                    kernel_durations_a[name] = duration;
+                }
+            }
+            
+            // Process GPU B
+            const data_b = source_b.data;
+            const kernel_durations_b = {};
+            for (let i = 0; i < data_b['Kernel Name'].length; i++) {
+                const name = data_b['Kernel Name'][i];
+                const duration = data_b['Duration (us)'][i];
+                if (kernel_durations_b[name]) {
+                    kernel_durations_b[name] += duration;
+                } else {
+                    kernel_durations_b[name] = duration;
+                }
+            }
+            
+            let total_duration_a = 0;
+            let total_duration_b = 0;
+            let found_count_a = 0;
+            let found_count_b = 0;
+            
+            let results_html = '<h4>Combined Results:</h4>';
+            results_html += '<table style="border-collapse: collapse; width: 100%;">';
+            results_html += `<tr style="background-color: #f0f0f0;"><th style="border: 1px solid #ddd; padding: 8px;">Kernel Name</th><th style="border: 1px solid #ddd; padding: 8px;">${gpu_name_a} Duration (μs)</th><th style="border: 1px solid #ddd; padding: 8px;">${gpu_name_b} Duration (μs)</th><th style="border: 1px solid #ddd; padding: 8px;">Difference (μs)</th><th style="border: 1px solid #ddd; padding: 8px;">Ratio (A/B)</th></tr>`;
+            
+            for (let kernel_name of kernel_names) {
+                const duration_a = kernel_durations_a[kernel_name] || 0;
+                const duration_b = kernel_durations_b[kernel_name] || 0;
+                const difference = duration_a - duration_b;
+                const ratio = duration_b > 0 ? (duration_a / duration_b) : 'N/A';
+                
+                if (duration_a > 0) {
+                    total_duration_a += duration_a;
+                    found_count_a++;
+                }
+                if (duration_b > 0) {
+                    total_duration_b += duration_b;
+                    found_count_b++;
+                }
+                
+                const ratio_text = ratio === 'N/A' ? 'N/A' : ratio.toFixed(3);
+                const difference_color = difference > 0 ? 'color: red;' : difference < 0 ? 'color: green;' : '';
+                
+                results_html += `<tr>
+                    <td style="border: 1px solid #ddd; padding: 8px;">${kernel_name}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${duration_a.toFixed(3)}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${duration_b.toFixed(3)}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px; text-align: right; ${difference_color}">${difference.toFixed(3)}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${ratio_text}</td>
+                </tr>`;
+            }
+            
+            const total_difference = total_duration_a - total_duration_b;
+            const total_ratio = total_duration_b > 0 ? (total_duration_a / total_duration_b).toFixed(3) : 'N/A';
+            const total_difference_color = total_difference > 0 ? 'color: red;' : total_difference < 0 ? 'color: green;' : '';
+            
+            results_html += `<tr style="background-color: #e6f3ff; font-weight: bold;">
+                <td style="border: 1px solid #ddd; padding: 8px;">TOTAL</td>
+                <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${total_duration_a.toFixed(3)}</td>
+                <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${total_duration_b.toFixed(3)}</td>
+                <td style="border: 1px solid #ddd; padding: 8px; text-align: right; ${total_difference_color}">${total_difference.toFixed(3)}</td>
+                <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${total_ratio}</td>
+            </tr>`;
+            results_html += '</table>';
+            
+            results_html += `<p><strong>Summary:</strong></p>`;
+            results_html += `<p>${gpu_name_a}: Found ${found_count_a}/${kernel_names.length} kernels, Total: <strong>${total_duration_a.toFixed(3)} μs</strong></p>`;
+            results_html += `<p>${gpu_name_b}: Found ${found_count_b}/${kernel_names.length} kernels, Total: <strong>${total_duration_b.toFixed(3)} μs</strong></p>`;
+            results_html += `<p>Difference: <strong style="${total_difference_color}">${total_difference.toFixed(3)} μs</strong></p>`;
+            
+            result_div.text = results_html;
+            """
+        )
+        
+        # Attach callbacks
+        self.calc_button_a.js_on_click(calc_callback_a)
+        self.calc_button_b.js_on_click(calc_callback_b)
+        self.calc_button_combined.js_on_click(calc_callback_combined)
+
+
 class TableManager:
     """Class to manage data tables"""
     
@@ -455,8 +726,10 @@ class TableManager:
         self.controls = control_manager
         self.charts = chart_manager
         self.tables = {}
+        self.copy_buttons = {}
         self._create_tables()
         self._setup_table_interactions()
+        self._create_copy_buttons()
     
     def _create_table_columns(self):
         """Create standard table columns"""
@@ -489,41 +762,151 @@ class TableManager:
         
         # Individual view tables
         self.tables['gpu_a'] = DataTable(source=self.ds.source_gpu_a_filtered, columns=columns, 
-                                        width=2000, height=600, index_position=None)
+                                        width=2000, height=600, index_position=None, selectable=True)
         self.tables['gpu_b'] = DataTable(source=self.ds.source_gpu_b_filtered, columns=columns, 
-                                        width=2000, height=600, index_position=None)
+                                        width=2000, height=600, index_position=None, selectable=True)
         
         # Sorted tables
         self.tables['sorted_gpu_a'] = DataTable(source=self.ds.source_sorted_gpu_a_filtered, columns=columns, 
-                                               width=2000, height=600, index_position=None)
+                                               width=2000, height=600, index_position=None, selectable=True)
         self.tables['sorted_gpu_b'] = DataTable(source=self.ds.source_sorted_gpu_b_filtered, columns=columns, 
-                                               width=2000, height=600, index_position=None)
+                                               width=2000, height=600, index_position=None, selectable=True)
         
         # Combined view tables
         self.tables['gpu_a_combined'] = DataTable(source=self.ds.source_gpu_a_combined_filtered, columns=columns, 
-                                                 width=1000, height=600, index_position=None)
+                                                 width=1000, height=600, index_position=None, selectable=True)
         self.tables['gpu_b_combined'] = DataTable(source=self.ds.source_gpu_b_combined_filtered, columns=columns, 
-                                                 width=1000, height=600, index_position=None)
+                                                 width=1000, height=600, index_position=None, selectable=True)
         
         # Combined sorted tables
         self.tables['sorted_gpu_a_combined'] = DataTable(source=self.ds.source_sorted_gpu_a_combined_filtered, columns=columns, 
-                                                        width=1000, height=600, index_position=None)
+                                                        width=1000, height=600, index_position=None, selectable=True)
         self.tables['sorted_gpu_b_combined'] = DataTable(source=self.ds.source_sorted_gpu_b_combined_filtered, columns=columns, 
-                                                        width=1000, height=600, index_position=None)
+                                                        width=1000, height=600, index_position=None, selectable=True)
         
         # Top N tables
         self.tables['top_gpu_a'] = DataTable(source=self.ds.source_top_gpu_a, columns=top_columns, 
-                                           width=2000, height=600, index_position=None)
+                                           width=2000, height=600, index_position=None, selectable=True)
         self.tables['top_gpu_b'] = DataTable(source=self.ds.source_top_gpu_b, columns=top_columns, 
-                                            width=2000, height=600, index_position=None)
+                                            width=2000, height=600, index_position=None, selectable=True)
         self.tables['top_both'] = DataTable(source=self.ds.source_top_both, columns=top_columns, 
-                                          width=800, height=300, index_position=None)
+                                          width=800, height=300, index_position=None, selectable=True)
         
         # Combined top N tables
         self.tables['top_gpu_a_combined'] = DataTable(source=self.ds.source_top_gpu_a, columns=top_columns, 
-                                                     width=1000, height=600, index_position=None)
+                                                     width=1000, height=600, index_position=None, selectable=True)
         self.tables['top_gpu_b_combined'] = DataTable(source=self.ds.source_top_gpu_b, columns=top_columns, 
-                                                     width=1000, height=600, index_position=None)
+                                                     width=1000, height=600, index_position=None, selectable=True)
+    
+    def _create_copy_js(self, columns, with_headers=True):
+        """Create JavaScript for copying table data to clipboard in Excel-friendly format"""
+        if columns == 'top':
+            cols = ['Kernel Name', 'Total Duration (us)', 'Count', 'Avg Duration (us)']
+        else:
+            cols = ['Kernel Index', 'Kernel Name', 'Start (us)', 'Duration (us)', 'End (us)']
+        
+        header_line = '"' + '"\t"'.join(cols) + '"' if with_headers else '';
+        
+        return f"""
+        const data = source.data;
+        const length = data['{cols[0]}'].length;
+        let text = '{header_line}';
+        
+        for (let i = 0; i < length; i++) {{
+            if (text && text !== '') text += '\\n';
+            const row = [];
+            {chr(10).join([f'row.push(String(data["{col}"][i]));' for col in cols])}
+            text += '"' + row.join('"\\t"') + '"';
+        }}
+        
+        navigator.clipboard.writeText(text).then(function() {{
+            console.log('Table data copied to clipboard');
+            button.label = 'Copied!';
+            setTimeout(() => {{ button.label = 'Copy Table'; }}, 2000);
+        }}).catch(function(err) {{
+            console.error('Could not copy data: ', err);
+            button.label = 'Copy Failed';
+            setTimeout(() => {{ button.label = 'Copy Table'; }}, 2000);
+        }});
+        """
+    
+    def _create_copy_buttons(self):
+        """Create copy buttons for all tables"""
+        # Individual view copy buttons
+        self.copy_buttons['gpu_a'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['gpu_a'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_gpu_a_filtered, button=self.copy_buttons['gpu_a']),
+            code=self._create_copy_js('standard')
+        ))
+        
+        self.copy_buttons['gpu_b'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['gpu_b'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_gpu_b_filtered, button=self.copy_buttons['gpu_b']),
+            code=self._create_copy_js('standard')
+        ))
+        
+        # Sorted tables copy buttons
+        self.copy_buttons['sorted_gpu_a'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['sorted_gpu_a'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_sorted_gpu_a_filtered, button=self.copy_buttons['sorted_gpu_a']),
+            code=self._create_copy_js('standard')
+        ))
+        
+        self.copy_buttons['sorted_gpu_b'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['sorted_gpu_b'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_sorted_gpu_b_filtered, button=self.copy_buttons['sorted_gpu_b']),
+            code=self._create_copy_js('standard')
+        ))
+        
+        # Top N tables copy buttons
+        self.copy_buttons['top_gpu_a'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['top_gpu_a'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_top_gpu_a, button=self.copy_buttons['top_gpu_a']),
+            code=self._create_copy_js('top')
+        ))
+        
+        self.copy_buttons['top_gpu_b'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['top_gpu_b'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_top_gpu_b, button=self.copy_buttons['top_gpu_b']),
+            code=self._create_copy_js('top')
+        ))
+        
+        # Combined view copy buttons
+        self.copy_buttons['gpu_a_combined'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['gpu_a_combined'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_gpu_a_combined_filtered, button=self.copy_buttons['gpu_a_combined']),
+            code=self._create_copy_js('standard')
+        ))
+        
+        self.copy_buttons['gpu_b_combined'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['gpu_b_combined'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_gpu_b_combined_filtered, button=self.copy_buttons['gpu_b_combined']),
+            code=self._create_copy_js('standard')
+        ))
+        
+        self.copy_buttons['sorted_gpu_a_combined'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['sorted_gpu_a_combined'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_sorted_gpu_a_combined_filtered, button=self.copy_buttons['sorted_gpu_a_combined']),
+            code=self._create_copy_js('standard')
+        ))
+        
+        self.copy_buttons['sorted_gpu_b_combined'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['sorted_gpu_b_combined'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_sorted_gpu_b_combined_filtered, button=self.copy_buttons['sorted_gpu_b_combined']),
+            code=self._create_copy_js('standard')
+        ))
+        
+        self.copy_buttons['top_gpu_a_combined'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['top_gpu_a_combined'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_top_gpu_a, button=self.copy_buttons['top_gpu_a_combined']),
+            code=self._create_copy_js('top')
+        ))
+        
+        self.copy_buttons['top_gpu_b_combined'] = Button(label="Copy Table", width=100, button_type="primary")
+        self.copy_buttons['top_gpu_b_combined'].js_on_click(CustomJS(
+            args=dict(source=self.ds.source_top_gpu_b, button=self.copy_buttons['top_gpu_b_combined']),
+            code=self._create_copy_js('top')
+        ))
     
     def _setup_table_interactions(self):
         """Setup table interaction callbacks"""
@@ -618,6 +1001,7 @@ class DashboardBuilder:
         self.chart_manager = ChartManager(self.data_sources, gpu_name_a, gpu_name_b)
         self.control_manager = ControlManager(self.data_sources, self.chart_manager, gpu_name_a, gpu_name_b)
         self.table_manager = TableManager(self.data_sources, self.control_manager, self.chart_manager)
+        self.duration_calculator = KernelDurationCalculator(self.data_sources, gpu_name_a, gpu_name_b)
     
     def create_layout(self):
         """Create the complete dashboard layout"""
@@ -629,12 +1013,16 @@ class DashboardBuilder:
             row(spacer, Div(text=f"<h2>{self.gpu_name_a} Kernel Analysis</h2>")),
             row(spacer, self.control_manager.window_size_spinner, self.control_manager.slider_gpu_a),
             row(spacer, self.chart_manager.charts['gpu_a']),
-            row(spacer, Div(text="<h3>Kernel Details Table</h3>")),
+            row(spacer, Div(text="<h3>Kernel Details Table</h3>"), self.table_manager.copy_buttons['gpu_a']),
             row(spacer, self.table_manager.tables['gpu_a']),
-            row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>")),
+            row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"), self.table_manager.copy_buttons['sorted_gpu_a']),
             row(spacer, self.table_manager.tables['sorted_gpu_a']),
-            row(spacer, Div(text="<h3>Top 10 Kernels by Total Duration</h3>")),
-            row(spacer, self.table_manager.tables['top_gpu_a'])
+            row(spacer, Div(text="<h3>Top 10 Kernels by Total Duration</h3>"), self.table_manager.copy_buttons['top_gpu_a']),
+            row(spacer, self.table_manager.tables['top_gpu_a']),
+            row(spacer, Div(text="<h3>Duration Calculator</h3>")),
+            row(spacer, self.duration_calculator.kernel_input_a),
+            row(spacer, self.duration_calculator.calc_button_a),
+            row(spacer, self.duration_calculator.result_div_a)
         )
         
         # GPU B layout with left spacing
@@ -642,12 +1030,16 @@ class DashboardBuilder:
             row(spacer, Div(text=f"<h2>{self.gpu_name_b} Kernel Analysis</h2>")),
             row(spacer, self.control_manager.window_size_spinner, self.control_manager.slider_gpu_b),
             row(spacer, self.chart_manager.charts['gpu_b']),
-            row(spacer, Div(text="<h3>Kernel Details Table</h3>")),
+            row(spacer, Div(text="<h3>Kernel Details Table</h3>"), self.table_manager.copy_buttons['gpu_b']),
             row(spacer, self.table_manager.tables['gpu_b']),
-            row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>")),
+            row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"), self.table_manager.copy_buttons['sorted_gpu_b']),
             row(spacer, self.table_manager.tables['sorted_gpu_b']),
-            row(spacer, Div(text="<h3>Top 10 Kernels by Total Duration</h3>")),
-            row(spacer, self.table_manager.tables['top_gpu_b'])
+            row(spacer, Div(text="<h3>Top 10 Kernels by Total Duration</h3>"), self.table_manager.copy_buttons['top_gpu_b']),
+            row(spacer, self.table_manager.tables['top_gpu_b']),
+            row(spacer, Div(text="<h3>Duration Calculator</h3>")),
+            row(spacer, self.duration_calculator.kernel_input_b),
+            row(spacer, self.duration_calculator.calc_button_b),
+            row(spacer, self.duration_calculator.result_div_b)
         )
         
         # Combined layout with left spacing
@@ -658,18 +1050,30 @@ class DashboardBuilder:
             row(spacer, self.chart_manager.charts['gpu_a_combined'], self.chart_manager.charts['gpu_b_combined']),
             row(spacer, Div(text="<h3>Kernel Details Tables</h3>")),
             row(spacer,
-                column(Div(text=f"<h4>{self.gpu_name_a} Kernels</h4>"), self.table_manager.tables['gpu_a_combined']),
-                column(Div(text=f"<h4>{self.gpu_name_b} Kernels</h4>"), self.table_manager.tables['gpu_b_combined'])
+                column(Div(text=f"<h4>{self.gpu_name_a} Kernels</h4>"), 
+                       row(self.table_manager.copy_buttons['gpu_a_combined']), 
+                       self.table_manager.tables['gpu_a_combined']),
+                column(Div(text=f"<h4>{self.gpu_name_b} Kernels</h4>"), 
+                       row(self.table_manager.copy_buttons['gpu_b_combined']), 
+                       self.table_manager.tables['gpu_b_combined'])
             ),
             row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>")),
             row(spacer,
-                column(Div(text=f"<h4>{self.gpu_name_a} Sorted by Latency</h4>"), self.table_manager.tables['sorted_gpu_a_combined']),
-                column(Div(text=f"<h4>{self.gpu_name_b} Sorted by Latency</h4>"), self.table_manager.tables['sorted_gpu_b_combined'])
+                column(Div(text=f"<h4>{self.gpu_name_a} Sorted by Latency</h4>"), 
+                       row(self.table_manager.copy_buttons['sorted_gpu_a_combined']), 
+                       self.table_manager.tables['sorted_gpu_a_combined']),
+                column(Div(text=f"<h4>{self.gpu_name_b} Sorted by Latency</h4>"), 
+                       row(self.table_manager.copy_buttons['sorted_gpu_b_combined']), 
+                       self.table_manager.tables['sorted_gpu_b_combined'])
             ),
             row(spacer, Div(text="<h3>Top 10 Kernels Comparison</h3>")),
             row(spacer,
-                column(Div(text=f"<h4>{self.gpu_name_a} Top Kernels</h4>"), self.table_manager.tables['top_gpu_a_combined']),
-                column(Div(text=f"<h4>{self.gpu_name_b} Top Kernels</h4>"), self.table_manager.tables['top_gpu_b_combined'])
+                column(Div(text=f"<h4>{self.gpu_name_a} Top Kernels</h4>"), 
+                       row(self.table_manager.copy_buttons['top_gpu_a_combined']), 
+                       self.table_manager.tables['top_gpu_a_combined']),
+                column(Div(text=f"<h4>{self.gpu_name_b} Top Kernels</h4>"), 
+                       row(self.table_manager.copy_buttons['top_gpu_b_combined']), 
+                       self.table_manager.tables['top_gpu_b_combined'])
             ),
         )
         

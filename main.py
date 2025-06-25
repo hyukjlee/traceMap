@@ -16,7 +16,7 @@ from collections import Counter
 from bokeh.palettes import Category20, Set3, Spectral11, Turbo256
 from bokeh.transform import transform
 import hashlib
-
+import re
 
 class TraceAnalyzer:
     """Class to handle trace data extraction and processing"""
@@ -30,34 +30,63 @@ class TraceAnalyzer:
         with gzip.open(self.trace_path, 'rt', encoding='utf-8') as f:
             trace_data = json.load(f)
         
-        events = trace_data.get("traceEvents", [])
+        events = trace_data.get("traceEvents", [])       
         kernel_events = []
         
         for event in events:
+            #import pdb; pdb.set_trace()
             if event.get("ph") == "X" and "kernel" in event.get("cat", "").lower():
+                 
                 kernel_name = event.get("name", "")
                 start = event.get("ts", 0)
                 duration = event.get("dur", 0)
+                source = self._classify_kernel(kernel_name)
                 end = start + duration
-                kernel_events.append((kernel_name, start, duration, end))
-        
+                kernel_events.append((source, kernel_name, start, duration, end))
+                #import pdb; pdb.set_trace()
         if kernel_events:
-            base_time = kernel_events[0][1]
+            base_time = kernel_events[0][2]
             parsed = [{
                 "Kernel Index": idx,
+                "Kernel Source": source,
                 "Kernel Name": name,
                 "Start (us)": round(start - base_time, 3),
                 "Duration (us)": round(duration, 3),
                 "End (us)": round(end - base_time, 3),
-            } for idx, (name, start, duration, end) in enumerate(kernel_events)]
+            } for idx, (source, name, start, duration, end) in enumerate(kernel_events)]
             df = pd.DataFrame(parsed)
             
             # Add color mapping for kernels
             df = self._add_kernel_colors(df)
             return df
         else:
-            return pd.DataFrame(columns=["Kernel Index", "Kernel Name", "Start (us)", "Duration (us)", "End (us)", "Color"])
+            return pd.DataFrame(columns=["Kernel Index","Kernel Source", "Kernel Name", "Start (us)", "Duration (us)", "End (us)", "Color"])
     
+    def _classify_kernel(self, name):
+        n = name.lower()
+        if "vllm::" in n or "vllm" in n:
+            return "vLLM"
+        if re.search(r"^aten::|at::native::", n):
+            return "PyTorch Eager"
+        if re.search(r"triton_.*fused|fused_cat|void kernel\d+\(", n):
+            return "torch.compile (Triton)"
+        if "paged_attention" in n or "reshape_and_cache_flash" in n or "ait" in n:
+            return "AITer"
+        if re.search(r"^cijk_|isa942|mt\d+x\d+", n) and len(n) > 100:
+            return "Composable Kernel (CK)"
+        if n.startswith("void rocblas_") or "rocblas" in n:
+            return "rocBLAS"
+        if n.startswith("miopen") or "batchnorm" in n or "convolution" in n:
+            return "MIOpen"
+        if "cublas" in n or "cudnn" in n or "cutlass" in n:
+            return "cuBLAS/cuDNN"
+        if "hipmemcpy" in n or "hiplaunchkernel" in n or "cuda" in n:
+            return "HIP/CUDA Runtime"
+        if "_zn" in n and "ck" in n:
+            return "CK (mangled)"
+        return "Unknown"
+
+
     def _add_kernel_colors(self, df):
         """Add consistent color mapping for each unique kernel name"""
         unique_kernels = df['Kernel Name'].unique()
@@ -910,7 +939,8 @@ class TableManager:
         """Create standard table columns"""
         return [
             TableColumn(field="Kernel Index", title="Index", width=80),
-            TableColumn(field="Kernel Name", title="Kernel Name", width=600),
+            TableColumn(field="Kernel Source", title="Source", width=150),
+            TableColumn(field="Kernel Name", title="Kernel Name", width=450),
             TableColumn(field="Start (us)", title="Start (μs)", width=100, 
                        formatter=NumberFormatter(format="0,0.000")),
             TableColumn(field="Duration (us)", title="Duration (μs)", width=120, 
@@ -978,7 +1008,7 @@ class TableManager:
         if columns == 'top':
             cols = ['Kernel Name', 'Total Duration (us)', 'Count', 'Avg Duration (us)']
         else:
-            cols = ['Kernel Index', 'Kernel Name', 'Start (us)', 'Duration (us)', 'End (us)']
+            cols = ['Kernel Index', 'Kernel Source', 'Kernel Name', 'Start (us)', 'Duration (us)', 'End (us)']
         
         header_line = '"' + '"\t"'.join(cols) + '"' if with_headers else '';
         

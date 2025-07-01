@@ -17,6 +17,9 @@ from bokeh.palettes import Category20, Set3, Spectral11, Turbo256
 from bokeh.transform import transform
 import hashlib
 import re
+from mlxtend.frequent_patterns import fpgrowth
+from mlxtend.preprocessing import TransactionEncoder
+
 
 class TraceAnalyzer:
     """Class to handle trace data extraction and processing"""
@@ -24,7 +27,7 @@ class TraceAnalyzer:
     def __init__(self, trace_path):
         self.trace_path = trace_path
         self.df = self.extract_kernel_data()
-    
+
     def extract_kernel_data(self):
         """Extract kernel data from trace file"""
         with gzip.open(self.trace_path, 'rt', encoding='utf-8') as f:
@@ -62,30 +65,62 @@ class TraceAnalyzer:
         else:
             return pd.DataFrame(columns=["Kernel Index","Kernel Source", "Kernel Name", "Start (us)", "Duration (us)", "End (us)", "Color"])
     
-    def _classify_kernel(self, name):
-        n = name.lower()
-        if "vllm::" in n or "vllm" in n:
-            return "vLLM"
-        if re.search(r"^aten::|at::native::", n):
-            return "PyTorch Eager"
-        if re.search(r"triton_.*fused|fused_cat|void kernel\d+\(", n):
-            return "torch.compile (Triton)"
-        if "paged_attention" in n or "reshape_and_cache_flash" in n or "ait" in n:
-            return "AITer"
-        if re.search(r"^cijk_|isa942|mt\d+x\d+", n) and len(n) > 100:
-            return "Composable Kernel (CK)"
-        if n.startswith("void rocblas_") or "rocblas" in n:
-            return "rocBLAS"
-        if n.startswith("miopen") or "batchnorm" in n or "convolution" in n:
-            return "MIOpen"
-        if "cublas" in n or "cudnn" in n or "cutlass" in n:
-            return "cuBLAS/cuDNN"
-        if "hipmemcpy" in n or "hiplaunchkernel" in n or "cuda" in n:
-            return "HIP/CUDA Runtime"
-        if "_zn" in n and "ck" in n:
-            return "CK (mangled)"
-        return "Unknown"
+    import re
 
+    def _classify_kernel(self, name):
+        """
+        Classify a kernel symbol name by its source library/backend.
+        Returns one of:
+        - 'torch.compile (Triton)'
+        - 'Composable Kernel (CK)'
+        - 'AITer'
+        - 'HIP'
+        - 'CUDA'
+        - 'rocBLAS'
+        - 'MIOpen'
+        - 'PyTorch Eager'
+        - 'vLLM'
+        - 'Unknown'
+        """
+        n = name.lower()
+
+        # torch.compile → Triton-generated kernels
+        if re.search(r'\btriton_', n) or 'fused_cat' in n:
+            return 'torch.compile (Triton)'
+
+        # Composable Kernel (CK) from ROCm/composable_kernel
+        if n.startswith('cijk_') or 'isa942' in n:
+            return 'Composable Kernel (CK)'
+
+        # AIter kernels (ROCm/aiter)
+        if any(tok in n for tok in ('reshape_and_cache_flash', 'paged_attention_ll4mi', 'composedattention')):
+            return 'AITer'
+
+        # HIP kernels (any use of __hip types)
+        if '__hip' in n:
+            return 'HIP'
+
+        # CUDA kernels (simple heuristic: __global__ or cuda_ prefix)
+        if '__global__' in n or n.startswith('cuda_') or 'cuda' in n:
+            return 'CUDA'
+
+        # rocBLAS
+        if 'rocblas' in n:
+            return 'rocBLAS'
+
+        # MIOpen
+        if 'miopen' in n:
+            return 'MIOpen'
+
+        # PyTorch eager (ATen/native) kernels
+        if re.search(r'^(aten::|at::native::)', n):
+            return 'PyTorch Eager'
+
+        # vLLM-internal kernels
+        if 'vllm::' in n:
+            return 'vLLM'
+
+        return 'Unknown'
 
     def _add_kernel_colors(self, df):
         """Add consistent color mapping for each unique kernel name"""

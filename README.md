@@ -4,10 +4,9 @@ This tool generates interactive HTML dashboards for analyzing PyTorch profiler t
 ![image](https://github.com/user-attachments/assets/aecef59e-f76b-458f-a515-1e2f2dacbbcc)
 
 ### Features
-- Interactive HTML DashboardGenerate a standalone HTML report to zoom, pan, and inspect individual kernel execution events.
-- Side-by-Side Trace ComparisonCompare two trace files to easily spot regressions or improvements in kernel-level performance.
-- Optimized for LLM InferenceTailored for vLLM traces, with attention to CUDA graph behavior, TTFT (time-to-first-token), and kernel throughput.
-- Lightweight and PortableNo server needed. Outputs a self-contained HTML file viewable in any modern browser.
+- Interactive HTML Dashboard: Generate a standalone HTML report to zoom, pan, and inspect individual kernel execution events.
+- Side-by-Side Trace Comparison: Compare two trace files to easily spot regressions or improvements in kernel-level performance.
+- Lightweight and Portable: Outputs a self-contained HTML file viewable in any modern browser. You can open it in your phone, laptop and tablet. 
 
 ## Prerequisites
 

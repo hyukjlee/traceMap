@@ -7,186 +7,97 @@ from bokeh.plotting import figure, save, output_file
 from bokeh.layouts import column, row
 from bokeh.models import (
     ColumnDataSource, DataTable, TableColumn, Slider, 
-    LinearColorMapper, ColorBar, CategoricalColorMapper, 
     CustomJS, Div, Select, NumberFormatter, Tabs, TabPanel,
-    Spinner, Button, TextAreaInput, TextInput, CheckboxGroup
+    Spinner
 )
 from bokeh.io import curdoc
 from collections import Counter
-from bokeh.palettes import Category20, Set3, Spectral11, Turbo256
-from bokeh.transform import transform
-import hashlib
-import re
-from mlxtend.frequent_patterns import fpgrowth
-from mlxtend.preprocessing import TransactionEncoder
 
+def extract_kernel_data(trace_path):
+    with gzip.open(trace_path, 'rt', encoding='utf-8') as f:
+        trace_data = json.load(f)
+    events = trace_data.get("traceEvents", [])
+    kernel_events = []
+    for event in events:
+        if event.get("ph") == "X" and "kernel" in event.get("cat", "").lower():
+            kernel_name = event.get("name", "")
+            start = event.get("ts", 0)
+            duration = event.get("dur", 0)
+            end = start + duration
+            kernel_events.append((kernel_name, start, duration, end))
+    if kernel_events:
+        base_time = kernel_events[0][1]
+        parsed = [{
+            "Kernel Index": idx,
+            "Kernel Name": name,
+            "Start (us)": round(start - base_time, 3),
+            "Duration (us)": round(duration, 3),
+            "End (us)": round(end - base_time, 3),
+        } for idx, (name, start, duration, end) in enumerate(kernel_events)]
+        return pd.DataFrame(parsed)
+    else:
+        return pd.DataFrame(columns=["Kernel Index", "Kernel Name", "Start (us)", "Duration (us)", "End (us)"])
 
-class TraceAnalyzer:
-    """Class to handle trace data extraction and processing"""
+def create_top_n_data(df, n=10):
+    """Create top N kernels by total latency and counts"""
+    kernel_stats = df.groupby('Kernel Name').agg({
+        'Duration (us)': ['sum', 'count', 'mean']
+    }).round(3)
+    kernel_stats.columns = ['Total Duration (us)', 'Count', 'Avg Duration (us)']
+    kernel_stats = kernel_stats.sort_values('Total Duration (us)', ascending=False).head(n)
+    kernel_stats = kernel_stats.reset_index()
+    return kernel_stats
+
+def create_sorted_latency_data(df):
+    """Create sorted kernel data by latency for individual kernels"""
+    sorted_df = df.sort_values('Duration (us)', ascending=False).reset_index(drop=True)
+    return sorted_df
+
+def create_visualization(trace_path1, trace_path2, gpu_name_a="GPU_A", gpu_name_b="GPU_B"):
+    # Load traces
+    df_gpu_a = extract_kernel_data(trace_path1)
+    df_gpu_b = extract_kernel_data(trace_path2)
     
-    def __init__(self, trace_path):
-        self.trace_path = trace_path
-        self.df = self.extract_kernel_data()
-
-    def extract_kernel_data(self):
-        """Extract kernel data from trace file"""
-        with gzip.open(self.trace_path, 'rt', encoding='utf-8') as f:
-            trace_data = json.load(f)
-        
-        events = trace_data.get("traceEvents", [])       
-        kernel_events = []
-        
-        for event in events:
-            #import pdb; pdb.set_trace()
-            if event.get("ph") == "X" and "kernel" in event.get("cat", "").lower():
-                 
-                kernel_name = event.get("name", "")
-                start = event.get("ts", 0)
-                duration = event.get("dur", 0)
-                source = self._classify_kernel(kernel_name)
-                end = start + duration
-                kernel_events.append((source, kernel_name, start, duration, end))
-                #import pdb; pdb.set_trace()
-        if kernel_events:
-            base_time = kernel_events[0][2]
-            parsed = [{
-                "Kernel Index": idx,
-                "Kernel Source": source,
-                "Kernel Name": name,
-                "Start (us)": round(start - base_time, 3),
-                "Duration (us)": round(duration, 3),
-                "End (us)": round(end - base_time, 3),
-            } for idx, (source, name, start, duration, end) in enumerate(kernel_events)]
-            df = pd.DataFrame(parsed)
-            
-            # Add color mapping for kernels
-            df = self._add_kernel_colors(df)
-            return df
-        else:
-            return pd.DataFrame(columns=["Kernel Index","Kernel Source", "Kernel Name", "Start (us)", "Duration (us)", "End (us)", "Color"])
+    # Create data sources
+    source_gpu_a = ColumnDataSource(df_gpu_a)
+    source_gpu_b = ColumnDataSource(df_gpu_b)
     
-    import re
-
-    def _classify_kernel(self, name):
-        """
-        Classify a kernel symbol name by its source library/backend.
-        Returns one of:
-        - 'torch.compile (Triton)'
-        - 'Composable Kernel (CK)'
-        - 'AITer'
-        - 'HIP'
-        - 'CUDA'
-        - 'rocBLAS'
-        - 'MIOpen'
-        - 'PyTorch Eager'
-        - 'vLLM'
-        - 'Unknown'
-        """
-        n = name.lower()
-
-        # torch.compile → Triton-generated kernels
-        if re.search(r'\btriton_', n) or 'fused_cat' in n:
-            return 'torch.compile (Triton)'
-
-        # Composable Kernel (CK) from ROCm/composable_kernel
-        if n.startswith('cijk_') or 'isa942' in n:
-            return 'Composable Kernel (CK)'
-
-        # AIter kernels (ROCm/aiter)
-        if any(tok in n for tok in ('reshape_and_cache_flash', 'paged_attention_ll4mi', 'composedattention')):
-            return 'AITer'
-
-        # HIP kernels (any use of __hip types)
-        if '__hip' in n:
-            return 'HIP'
-
-        # CUDA kernels (simple heuristic: __global__ or cuda_ prefix)
-        if '__global__' in n or n.startswith('cuda_') or 'cuda' in n:
-            return 'CUDA'
-
-        # rocBLAS
-        if 'rocblas' in n:
-            return 'rocBLAS'
-
-        # MIOpen
-        if 'miopen' in n:
-            return 'MIOpen'
-
-        # PyTorch eager (ATen/native) kernels
-        if re.search(r'^(aten::|at::native::)', n):
-            return 'PyTorch Eager'
-
-        # vLLM-internal kernels
-        if 'vllm::' in n:
-            return 'vLLM'
-
-        return 'Unknown'
-
-    def _add_kernel_colors(self, df):
-        """Add consistent color mapping for each unique kernel name"""
-        unique_kernels = df['Kernel Name'].unique()
-        
-        # Create a larger color palette by combining multiple palettes
-        colors = []
-        colors.extend(Category20[20])
-        colors.extend(Set3[12])
-        colors.extend(Spectral11)
-        
-        # If we need more colors, generate them using hash
-        while len(colors) < len(unique_kernels):
-            colors.extend(Turbo256[::8])  # Take every 8th color from Turbo256
-        
-        # Create color mapping
-        color_map = {}
-        for i, kernel in enumerate(unique_kernels):
-            if i < len(colors):
-                color_map[kernel] = colors[i]
-            else:
-                # Generate color from hash if we run out of predefined colors
-                hash_color = self._hash_to_color(kernel)
-                color_map[kernel] = hash_color
-        
-        # Add color column
-        df['Color'] = df['Kernel Name'].map(color_map)
-        return df
+    # Create filtered sources for sliding window
+    default_window_size = 100  # Default window size
     
-    def _hash_to_color(self, text):
-        """Generate a consistent color from text hash"""
-        hash_obj = hashlib.md5(text.encode())
-        hash_hex = hash_obj.hexdigest()
-        # Take first 6 characters as RGB hex color
-        return f"#{hash_hex[:6]}"
+    source_gpu_a_filtered = ColumnDataSource(df_gpu_a.head(default_window_size))
+    source_gpu_b_filtered = ColumnDataSource(df_gpu_b.head(default_window_size))
     
-    def create_top_n_data(self, n=30):
-        """Create top N kernels by total latency and counts"""
-        kernel_stats = self.df.groupby('Kernel Name').agg({
-            'Duration (us)': ['sum', 'count', 'mean']
-        }).round(3)
-        kernel_stats.columns = ['Total Duration (us)', 'Count', 'Avg Duration (us)']
-        kernel_stats = kernel_stats.sort_values('Total Duration (us)', ascending=False).head(n)
-        return kernel_stats.reset_index()
+    # Sorted filtered sources - these will be sorted versions of the filtered data
+    initial_gpu_a_sorted = df_gpu_a.head(default_window_size).sort_values('Duration (us)', ascending=False).reset_index(drop=True)
+    initial_gpu_b_sorted = df_gpu_b.head(default_window_size).sort_values('Duration (us)', ascending=False).reset_index(drop=True)
     
-    def create_sorted_latency_data(self):
-        """Create sorted kernel data by latency for individual kernels"""
-        return self.df.sort_values('Duration (us)', ascending=False).reset_index(drop=True)
-
-
-class ChartManager:
-    """Class to manage chart creation and interactions"""
+    source_sorted_gpu_a_filtered = ColumnDataSource(initial_gpu_a_sorted)
+    source_sorted_gpu_b_filtered = ColumnDataSource(initial_gpu_b_sorted)
     
-    def __init__(self, data_sources, gpu_name_a="GPU_A", gpu_name_b="GPU_B"):
-        self.ds = data_sources
-        self.gpu_name_a = gpu_name_a
-        self.gpu_name_b = gpu_name_b
-        self.charts = {}
-        self.bars = {}
-        self.timeline_charts = {}
-        self.timeline_bars = {}
-        self._create_charts()
-        self._create_timeline_charts()
+    # For combined view - create separate filtered sources for side-by-side comparison
+    source_gpu_a_combined_filtered = ColumnDataSource(df_gpu_a.head(default_window_size))
+    source_gpu_b_combined_filtered = ColumnDataSource(df_gpu_b.head(default_window_size))
     
-    def _create_bar_chart(self, title, source_filtered, color, width=1000):
-        """Create a bar chart"""
+    # Combined sorted filtered sources
+    source_sorted_gpu_a_combined_filtered = ColumnDataSource(initial_gpu_a_sorted)
+    source_sorted_gpu_b_combined_filtered = ColumnDataSource(initial_gpu_b_sorted)
+    
+    # Create top N data sources
+    top_n_gpu_a = create_top_n_data(df_gpu_a)
+    top_n_gpu_b = create_top_n_data(df_gpu_b)
+    top_n_both = create_top_n_data(pd.concat([df_gpu_a, df_gpu_b], ignore_index=True))
+    
+    source_top_gpu_a = ColumnDataSource(top_n_gpu_a)
+    source_top_gpu_b = ColumnDataSource(top_n_gpu_b)
+    source_top_both = ColumnDataSource(top_n_both)
+    
+    # Window size controls
+    window_size_spinner = Spinner(title="Window Size:", low=10, high=1000, step=10, value=default_window_size, width=150)
+    window_size_spinner_combined = Spinner(title="Window Size:", low=10, high=1000, step=10, value=default_window_size, width=150)
+    
+    # Create bar charts
+    def create_bar_chart(title, source_filtered, color, width=800):
         p = figure(
             title=title,
             x_axis_label="Kernel Index",
@@ -199,179 +110,98 @@ class ChartManager:
                      source=source_filtered, color=color, alpha=0.7)
         return p, bars
     
-    def _create_timeline_chart(self, title, source_filtered, color, width=1000):
-        """Create a timeline chart showing kernel execution over time"""
-        p = figure(
-            title=title,
-            x_axis_label="Time (us)",
-            width=width,
-            height=400,  # Much shorter height since no y-axis
-            tools="pan,wheel_zoom,box_zoom,reset,save,tap",
-            y_range=(0, 1)  # Fixed small y-range
-        )
-        
-        # Hide y-axis
-        p.yaxis.visible = False
-        p.ygrid.visible = False
-        
-        # Create horizontal bars showing kernel execution timeline
-        # Use a fixed height and position for all kernels
-        bars = p.quad(left='Start (us)', right='End (us)', 
-                     bottom=0.1, top=0.9,  # Fixed positions
-                     source=source_filtered, color='Color', alpha=0.8)
-        
-        return p, bars
+    # GPU A Chart
+    chart_gpu_a, bars_gpu_a = create_bar_chart(f"{gpu_name_a} Kernel Latency", source_gpu_a_filtered, "blue", width=2000)
     
-    def _create_charts(self):
-        """Create all bar charts"""
-        # Individual GPU charts
-        self.charts['gpu_a'], self.bars['gpu_a'] = self._create_bar_chart(
-            f"{self.gpu_name_a} Kernel Latency", self.ds.source_gpu_a_filtered, "blue", width=2000)
-        
-        self.charts['gpu_b'], self.bars['gpu_b'] = self._create_bar_chart(
-            f"{self.gpu_name_b} Kernel Latency", self.ds.source_gpu_b_filtered, "red", width=2000)
-        
-        # Combined view charts
-        self.charts['gpu_a_combined'], self.bars['gpu_a_combined'] = self._create_bar_chart(
-            f"{self.gpu_name_a} Kernel Latency", self.ds.source_gpu_a_combined_filtered, "blue", width=1000)
-        
-        self.charts['gpu_b_combined'], self.bars['gpu_b_combined'] = self._create_bar_chart(
-            f"{self.gpu_name_b} Kernel Latency", self.ds.source_gpu_b_combined_filtered, "red", width=1000)
+    # GPU B Chart  
+    chart_gpu_b, bars_gpu_b = create_bar_chart(f"{gpu_name_b} Kernel Latency", source_gpu_b_filtered, "red", width=2000)
     
-    def _create_timeline_charts(self):
-        """Create all timeline charts"""
-        # Individual GPU timeline charts
-        self.timeline_charts['gpu_a'], self.timeline_bars['gpu_a'] = self._create_timeline_chart(
-            f"{self.gpu_name_a} Kernel Timeline", self.ds.source_gpu_a_filtered, "blue", width=2000)
-        
-        self.timeline_charts['gpu_b'], self.timeline_bars['gpu_b'] = self._create_timeline_chart(
-            f"{self.gpu_name_b} Kernel Timeline", self.ds.source_gpu_b_filtered, "red", width=2000)
-        
-        # Combined view timeline charts
-        self.timeline_charts['gpu_a_combined'], self.timeline_bars['gpu_a_combined'] = self._create_timeline_chart(
-            f"{self.gpu_name_a} Kernel Timeline", self.ds.source_gpu_a_combined_filtered, "blue", width=1000)
-        
-        self.timeline_charts['gpu_b_combined'], self.timeline_bars['gpu_b_combined'] = self._create_timeline_chart(
-            f"{self.gpu_name_b} Kernel Timeline", self.ds.source_gpu_b_combined_filtered, "red", width=1000)
-
-
-class DataSourceManager:
-    """Class to manage Bokeh data sources"""
+    # Combined Charts - Side by Side
+    chart_gpu_a_combined, bars_gpu_a_combined = create_bar_chart(f"{gpu_name_a} Kernel Latency", source_gpu_a_combined_filtered, "blue", width=1000)
+    chart_gpu_b_combined, bars_gpu_b_combined = create_bar_chart(f"{gpu_name_b} Kernel Latency", source_gpu_b_combined_filtered, "red", width=1000)
     
-    def __init__(self, trace_analyzer_a, trace_analyzer_b, default_window_size=100):
-        self.trace_a = trace_analyzer_a
-        self.trace_b = trace_analyzer_b
-        self.window_size = default_window_size
-        self._create_data_sources()
+    # Create sliders for sliding windows
+    slider_gpu_a = Slider(
+        start=0, end=max(0, len(df_gpu_a) - default_window_size), value=0, 
+        step=default_window_size, title=f"{gpu_name_a} Kernel Index Window (showing {default_window_size} at a time)", width=1000
+    )
     
-    def _add_timeline_data(self, df):
-        """Add data needed for timeline visualization"""
-        df_copy = df.copy()
-        # No longer need kernel_top since we're not using y-axis positioning
-        return df_copy
+    slider_gpu_b = Slider(
+        start=0, end=max(0, len(df_gpu_b) - default_window_size), value=0, 
+        step=default_window_size, title=f"{gpu_name_b} Kernel Index Window (showing {default_window_size} at a time)", width=1000
+    )
     
-    def _create_data_sources(self):
-        """Create all necessary data sources"""
-        # Add timeline data to dataframes
-        trace_a_timeline = self._add_timeline_data(self.trace_a.df)
-        trace_b_timeline = self._add_timeline_data(self.trace_b.df)
-        
-        # Main data sources
-        self.source_gpu_a = ColumnDataSource(trace_a_timeline)
-        self.source_gpu_b = ColumnDataSource(trace_b_timeline)
-        
-        # Filtered sources for sliding window
-        self.source_gpu_a_filtered = ColumnDataSource(trace_a_timeline.head(self.window_size))
-        self.source_gpu_b_filtered = ColumnDataSource(trace_b_timeline.head(self.window_size))
-        
-        # Sorted filtered sources
-        initial_gpu_a_sorted = trace_a_timeline.head(self.window_size).sort_values('Duration (us)', ascending=False).reset_index(drop=True)
-        initial_gpu_a_sorted = self._add_timeline_data(initial_gpu_a_sorted)
-        
-        initial_gpu_b_sorted = trace_b_timeline.head(self.window_size).sort_values('Duration (us)', ascending=False).reset_index(drop=True)
-        initial_gpu_b_sorted = self._add_timeline_data(initial_gpu_b_sorted)
-        
-        self.source_sorted_gpu_a_filtered = ColumnDataSource(initial_gpu_a_sorted)
-        self.source_sorted_gpu_b_filtered = ColumnDataSource(initial_gpu_b_sorted)
-        
-        # Combined view sources
-        self.source_gpu_a_combined_filtered = ColumnDataSource(trace_a_timeline.head(self.window_size))
-        self.source_gpu_b_combined_filtered = ColumnDataSource(trace_b_timeline.head(self.window_size))
-        
-        self.source_sorted_gpu_a_combined_filtered = ColumnDataSource(initial_gpu_a_sorted)
-        self.source_sorted_gpu_b_combined_filtered = ColumnDataSource(initial_gpu_b_sorted)
-        
-        # Top N data sources
-        self.source_top_gpu_a = ColumnDataSource(self.trace_a.create_top_n_data())
-        self.source_top_gpu_b = ColumnDataSource(self.trace_b.create_top_n_data())
-        
-        combined_df = pd.concat([self.trace_a.df, self.trace_b.df], ignore_index=True)
-        combined_analyzer = TraceAnalyzer.__new__(TraceAnalyzer)
-        combined_analyzer.df = combined_df
-        self.source_top_both = ColumnDataSource(combined_analyzer.create_top_n_data())
-
-
-class ControlManager:
-    """Class to manage UI controls and interactions"""
+    # Combined sliders - separate for each GPU
+    slider_gpu_a_combined = Slider(
+        start=0, end=max(0, len(df_gpu_a) - default_window_size), value=0, 
+        step=default_window_size, title=f"{gpu_name_a} Kernel Index Window (showing {default_window_size} at a time)", width=1000
+    )
     
-    def __init__(self, data_sources, chart_manager, gpu_name_a="GPU_A", gpu_name_b="GPU_B", default_window_size=100):
-        self.ds = data_sources
-        self.chart_manager = chart_manager
-        self.gpu_name_a = gpu_name_a
-        self.gpu_name_b = gpu_name_b
-        self.default_window_size = default_window_size
-        self._create_controls()
-        self._setup_callbacks()
+    slider_gpu_b_combined = Slider(
+        start=0, end=max(0, len(df_gpu_b) - default_window_size), value=0, 
+        step=default_window_size, title=f"{gpu_name_b} Kernel Index Window (showing {default_window_size} at a time)", width=1000
+    )
     
-    def _create_controls(self):
-        """Create UI controls"""
-        # Chart type selection
-        self.chart_type_select = Select(
-            title="Chart Type:", value="Bar Chart", 
-            options=["Bar Chart", "Timeline Chart"], width=150
-        )
-        
-        self.chart_type_select_combined = Select(
-            title="Chart Type:", value="Bar Chart", 
-            options=["Bar Chart", "Timeline Chart"], width=150
-        )
-        
-        # Window size controls
-        self.window_size_spinner = Spinner(
-            title="Window Size:", low=10, high=1000, step=10, 
-            value=self.default_window_size, width=150)
-        self.window_size_spinner_combined = Spinner(
-            title="Window Size:", low=10, high=1000, step=10, 
-            value=self.default_window_size, width=150)
-        
-        # Sliders
-        self.slider_gpu_a = Slider(
-            start=0, end=max(0, len(self.ds.trace_a.df) - self.default_window_size), value=0, 
-            step=self.default_window_size, 
-            title=f"{self.gpu_name_a} Kernel Index Window (showing {self.default_window_size} at a time)", width=1000
-        )
-        
-        self.slider_gpu_b = Slider(
-            start=0, end=max(0, len(self.ds.trace_b.df) - self.default_window_size), value=0, 
-            step=self.default_window_size, 
-            title=f"{self.gpu_name_b} Kernel Index Window (showing {self.default_window_size} at a time)", width=1000
-        )
-        
-        # Combined sliders
-        self.slider_gpu_a_combined = Slider(
-            start=0, end=max(0, len(self.ds.trace_a.df) - self.default_window_size), value=0, 
-            step=self.default_window_size, 
-            title=f"{self.gpu_name_a} Kernel Index Window (showing {self.default_window_size} at a time)", width=1000
-        )
-        
-        self.slider_gpu_b_combined = Slider(
-            start=0, end=max(0, len(self.ds.trace_b.df) - self.default_window_size), value=0, 
-            step=self.default_window_size, 
-            title=f"{self.gpu_name_b} Kernel Index Window (showing {self.default_window_size} at a time)", width=1000
-        )
+    # Create data tables
+    columns = [
+        TableColumn(field="Kernel Index", title="Index", width=80),
+        TableColumn(field="Kernel Name", title="Kernel Name", width=600),
+        TableColumn(field="Start (us)", title="Start (μs)", width=100, 
+                   formatter=NumberFormatter(format="0,0.000")),
+        TableColumn(field="Duration (us)", title="Duration (μs)", width=120, 
+                   formatter=NumberFormatter(format="0,0.000")),
+        TableColumn(field="End (us)", title="End (μs)", width=100, 
+                   formatter=NumberFormatter(format="0,0.000")),
+    ]
     
-    def _create_sorted_data_js(self):
-        """JavaScript function to create sorted data"""
+    table_gpu_a = DataTable(source=source_gpu_a_filtered, columns=columns, 
+                          width=2000, height=600, index_position=None)
+    table_gpu_b = DataTable(source=source_gpu_b_filtered, columns=columns, 
+                            width=2000, height=600, index_position=None)
+    
+    # Sorted latency tables
+    sorted_table_gpu_a = DataTable(source=source_sorted_gpu_a_filtered, columns=columns, 
+                                  width=2000, height=600, index_position=None)
+    sorted_table_gpu_b = DataTable(source=source_sorted_gpu_b_filtered, columns=columns, 
+                                   width=2000, height=600, index_position=None)
+    
+    # Combined tables - side by side
+    table_gpu_a_combined = DataTable(source=source_gpu_a_combined_filtered, columns=columns, 
+                                   width=1000, height=600, index_position=None)
+    table_gpu_b_combined = DataTable(source=source_gpu_b_combined_filtered, columns=columns, 
+                                     width=1000, height=600, index_position=None)
+    
+    # Combined sorted tables
+    sorted_table_gpu_a_combined = DataTable(source=source_sorted_gpu_a_combined_filtered, columns=columns, 
+                                          width=1000, height=600, index_position=None)
+    sorted_table_gpu_b_combined = DataTable(source=source_sorted_gpu_b_combined_filtered, columns=columns, 
+                                            width=1000, height=600, index_position=None)
+    
+    # Create top N tables
+    top_columns = [
+        TableColumn(field="Kernel Name", title="Kernel Name", width=680),
+        TableColumn(field="Total Duration (us)", title="Total Duration (μs)", width=120,
+                   formatter=NumberFormatter(format="0,0.000")),
+        TableColumn(field="Count", title="Count", width=60),
+        TableColumn(field="Avg Duration (us)", title="Avg Duration (μs)", width=120,
+                   formatter=NumberFormatter(format="0,0.000")),
+    ]
+    
+    top_table_gpu_a = DataTable(source=source_top_gpu_a, columns=top_columns, 
+                              width=2000, height=600, index_position=None)
+    top_table_gpu_b = DataTable(source=source_top_gpu_b, columns=top_columns, 
+                                width=2000, height=600, index_position=None)
+    top_table_both = DataTable(source=source_top_both, columns=top_columns, 
+                              width=800, height=300, index_position=None)
+    
+    # Combined top N tables - side by side
+    top_table_gpu_a_combined = DataTable(source=source_top_gpu_a, columns=top_columns, 
+                                       width=1000, height=600, index_position=None)
+    top_table_gpu_b_combined = DataTable(source=source_top_gpu_b, columns=top_columns, 
+                                         width=1000, height=600, index_position=None)
+    
+    # Helper function to create sorted data from filtered data
+    def create_sorted_data_js():
         return """
         function createSortedData(filtered_data) {
             const indices = [];
@@ -387,978 +217,366 @@ class ControlManager:
             for (let key in filtered_data) {
                 sorted_data[key] = indices.map(i => filtered_data[key][i]);
             }
-            
-            // Update Kernel Index for sorted data
-            for (let i = 0; i < sorted_data['Kernel Index'].length; i++) {
-                sorted_data['Kernel Index'][i] = i;
-            }
-            
             return sorted_data;
         }
         """
     
-    def _setup_callbacks(self):
-        """Setup JavaScript callbacks"""
-        # Chart type selection callbacks
-        self._setup_chart_type_callbacks()
+    # Window size change callback
+    window_size_callback = CustomJS(
+        args=dict(
+            spinner=window_size_spinner,
+            slider_gpu_a=slider_gpu_a,
+            slider_gpu_b=slider_gpu_b,
+            source_gpu_a=source_gpu_a,
+            source_gpu_b=source_gpu_b,
+            source_gpu_a_filtered=source_gpu_a_filtered,
+            source_gpu_b_filtered=source_gpu_b_filtered,
+            source_sorted_gpu_a_filtered=source_sorted_gpu_a_filtered,
+            source_sorted_gpu_b_filtered=source_sorted_gpu_b_filtered,
+            gpu_name_a=gpu_name_a,
+            gpu_name_b=gpu_name_b
+        ),
+        code=create_sorted_data_js() + """
+        const window_size = spinner.value;
         
-        # Window size callbacks
-        window_size_callback = CustomJS(
-            args=dict(
-                spinner=self.window_size_spinner,
-                slider_gpu_a=self.slider_gpu_a,
-                slider_gpu_b=self.slider_gpu_b,
-                source_gpu_a=self.ds.source_gpu_a,
-                source_gpu_b=self.ds.source_gpu_b,
-                source_gpu_a_filtered=self.ds.source_gpu_a_filtered,
-                source_gpu_b_filtered=self.ds.source_gpu_b_filtered,
-                source_sorted_gpu_a_filtered=self.ds.source_sorted_gpu_a_filtered,
-                source_sorted_gpu_b_filtered=self.ds.source_sorted_gpu_b_filtered,
-                gpu_name_a=self.gpu_name_a,
-                gpu_name_b=self.gpu_name_b
-            ),
-            code=self._create_sorted_data_js() + """
-            const window_size = spinner.value;
-            
-            slider_gpu_a.step = window_size;
-            slider_gpu_b.step = window_size;
-            slider_gpu_a.end = Math.max(0, source_gpu_a.data['Kernel Index'].length - window_size);
-            slider_gpu_b.end = Math.max(0, source_gpu_b.data['Kernel Index'].length - window_size);
-            slider_gpu_a.title = `${gpu_name_a} Kernel Index Window (showing ${window_size} at a time)`;
-            slider_gpu_b.title = `${gpu_name_b} Kernel Index Window (showing ${window_size} at a time)`;
-            
-            const start_gpu_a = slider_gpu_a.value;
-            const end_gpu_a = Math.min(start_gpu_a + window_size, source_gpu_a.data['Kernel Index'].length);
-            
-            const start_gpu_b = slider_gpu_b.value;
-            const end_gpu_b = Math.min(start_gpu_b + window_size, source_gpu_b.data['Kernel Index'].length);
-            
-            const gpu_a_filtered = {};
-            for (let key in source_gpu_a.data) {
-                gpu_a_filtered[key] = source_gpu_a.data[key].slice(start_gpu_a, end_gpu_a);
-            }
-            source_gpu_a_filtered.data = gpu_a_filtered;
-            
-            const gpu_b_filtered = {};
-            for (let key in source_gpu_b.data) {
-                gpu_b_filtered[key] = source_gpu_b.data[key].slice(start_gpu_b, end_gpu_b);
-            }
-            source_gpu_b_filtered.data = gpu_b_filtered;
-            
-            source_sorted_gpu_a_filtered.data = createSortedData(gpu_a_filtered);
-            source_sorted_gpu_b_filtered.data = createSortedData(gpu_b_filtered);
-            
-            source_gpu_a_filtered.change.emit();
-            source_gpu_b_filtered.change.emit();
-            source_sorted_gpu_a_filtered.change.emit();
-            source_sorted_gpu_b_filtered.change.emit();
-            """
-        )
+        // Update slider properties
+        slider_gpu_a.step = window_size;
+        slider_gpu_b.step = window_size;
+        slider_gpu_a.end = Math.max(0, source_gpu_a.data['Kernel Index'].length - window_size);
+        slider_gpu_b.end = Math.max(0, source_gpu_b.data['Kernel Index'].length - window_size);
+        slider_gpu_a.title = `${gpu_name_a} Kernel Index Window (showing ${window_size} at a time)`;
+        slider_gpu_b.title = `${gpu_name_b} Kernel Index Window (showing ${window_size} at a time)`;
         
-        # Similar callback for combined view
-        window_size_callback_combined = CustomJS(
-            args=dict(
-                spinner=self.window_size_spinner_combined,
-                slider_gpu_a=self.slider_gpu_a_combined,
-                slider_gpu_b=self.slider_gpu_b_combined,
-                source_gpu_a=self.ds.source_gpu_a,
-                source_gpu_b=self.ds.source_gpu_b,
-                source_gpu_a_filtered=self.ds.source_gpu_a_combined_filtered,
-                source_gpu_b_filtered=self.ds.source_gpu_b_combined_filtered,
-                source_sorted_gpu_a_filtered=self.ds.source_sorted_gpu_a_combined_filtered,
-                source_sorted_gpu_b_filtered=self.ds.source_sorted_gpu_b_combined_filtered,
-                gpu_name_a=self.gpu_name_a,
-                gpu_name_b=self.gpu_name_b
-            ),
-            code=self._create_sorted_data_js() + """
-            const window_size = spinner.value;
-            
-            slider_gpu_a.step = window_size;
-            slider_gpu_b.step = window_size;
-            slider_gpu_a.end = Math.max(0, source_gpu_a.data['Kernel Index'].length - window_size);
-            slider_gpu_b.end = Math.max(0, source_gpu_b.data['Kernel Index'].length - window_size);
-            slider_gpu_a.title = `${gpu_name_a} Kernel Index Window (showing ${window_size} at a time)`;
-            slider_gpu_b.title = `${gpu_name_b} Kernel Index Window (showing ${window_size} at a time)`;
-            
-            const start_gpu_a = slider_gpu_a.value;
-            const end_gpu_a = Math.min(start_gpu_a + window_size, source_gpu_a.data['Kernel Index'].length);
-            
-            const start_gpu_b = slider_gpu_b.value;
-            const end_gpu_b = Math.min(start_gpu_b + window_size, source_gpu_b.data['Kernel Index'].length);
-            
-            const gpu_a_filtered = {};
-            for (let key in source_gpu_a.data) {
-                gpu_a_filtered[key] = source_gpu_a.data[key].slice(start_gpu_a, end_gpu_a);
-            }
-            source_gpu_a_filtered.data = gpu_a_filtered;
-            
-            const gpu_b_filtered = {};
-            for (let key in source_gpu_b.data) {
-                gpu_b_filtered[key] = source_gpu_b.data[key].slice(start_gpu_b, end_gpu_b);
-            }
-            source_gpu_b_filtered.data = gpu_b_filtered;
-            
-            source_sorted_gpu_a_filtered.data = createSortedData(gpu_a_filtered);
-            source_sorted_gpu_b_filtered.data = createSortedData(gpu_b_filtered);
-            
-            source_gpu_a_filtered.change.emit();
-            source_gpu_b_filtered.change.emit();
-            source_sorted_gpu_a_filtered.change.emit();
-            source_sorted_gpu_b_filtered.change.emit();
-            """
-        )
+        // Update filtered data
+        const start_gpu_a = slider_gpu_a.value;
+        const end_gpu_a = Math.min(start_gpu_a + window_size, source_gpu_a.data['Kernel Index'].length);
         
-        # Attach window size callbacks
-        self.window_size_spinner.js_on_change('value', window_size_callback)
-        self.window_size_spinner_combined.js_on_change('value', window_size_callback_combined)
+        const start_gpu_b = slider_gpu_b.value;
+        const end_gpu_b = Math.min(start_gpu_b + window_size, source_gpu_b.data['Kernel Index'].length);
         
-        # Slider callbacks
-        self._setup_slider_callbacks()
-    
-    def _setup_chart_type_callbacks(self):
-        """Setup chart type selection callbacks"""
-        # Individual view chart type callback
-        chart_type_callback = CustomJS(
-            args=dict(
-                select=self.chart_type_select,
-                bar_chart_a=self.chart_manager.charts['gpu_a'],
-                timeline_chart_a=self.chart_manager.timeline_charts['gpu_a'],
-                bar_chart_b=self.chart_manager.charts['gpu_b'],
-                timeline_chart_b=self.chart_manager.timeline_charts['gpu_b']
-            ),
-            code="""
-            const chart_type = select.value;
-            
-            if (chart_type === "Bar Chart") {
-                bar_chart_a.visible = true;
-                timeline_chart_a.visible = false;
-                bar_chart_b.visible = true;
-                timeline_chart_b.visible = false;
-            } else {
-                bar_chart_a.visible = false;
-                timeline_chart_a.visible = true;
-                bar_chart_b.visible = false;
-                timeline_chart_b.visible = true;
-            }
-            """
-        )
+        // Update GPU A filtered data
+        const gpu_a_filtered = {};
+        for (let key in source_gpu_a.data) {
+            gpu_a_filtered[key] = source_gpu_a.data[key].slice(start_gpu_a, end_gpu_a);
+        }
+        source_gpu_a_filtered.data = gpu_a_filtered;
         
-        # Combined view chart type callback
-        chart_type_callback_combined = CustomJS(
-            args=dict(
-                select=self.chart_type_select_combined,
-                bar_chart_a=self.chart_manager.charts['gpu_a_combined'],
-                timeline_chart_a=self.chart_manager.timeline_charts['gpu_a_combined'],
-                bar_chart_b=self.chart_manager.charts['gpu_b_combined'],
-                timeline_chart_b=self.chart_manager.timeline_charts['gpu_b_combined']
-            ),
-            code="""
-            const chart_type = select.value;
-            
-            if (chart_type === "Bar Chart") {
-                bar_chart_a.visible = true;
-                timeline_chart_a.visible = false;
-                bar_chart_b.visible = true;
-                timeline_chart_b.visible = false;
-            } else {
-                bar_chart_a.visible = false;
-                timeline_chart_a.visible = true;
-                bar_chart_b.visible = false;
-                timeline_chart_b.visible = true;
-            }
-            """
-        )
+        // Update GPU B filtered data
+        const gpu_b_filtered = {};
+        for (let key in source_gpu_b.data) {
+            gpu_b_filtered[key] = source_gpu_b.data[key].slice(start_gpu_b, end_gpu_b);
+        }
+        source_gpu_b_filtered.data = gpu_b_filtered;
         
-        self.chart_type_select.js_on_change('value', chart_type_callback)
-        self.chart_type_select_combined.js_on_change('value', chart_type_callback_combined)
-    
-    def _setup_slider_callbacks(self):
-        """Setup slider callbacks"""
-        slider_callback_gpu_a = CustomJS(
-            args=dict(
-                source=self.ds.source_gpu_a, 
-                source_filtered=self.ds.source_gpu_a_filtered, 
-                source_sorted_filtered=self.ds.source_sorted_gpu_a_filtered,
-                slider=self.slider_gpu_a,
-                spinner=self.window_size_spinner
-            ),
-            code=self._create_sorted_data_js() + """
-            const start = slider.value;
-            const window_size = spinner.value;
-            const end = Math.min(start + window_size, source.data['Kernel Index'].length);
-            
-            const filtered_data = {};
-            for (let key in source.data) {
-                filtered_data[key] = source.data[key].slice(start, end);
-            }
-            source_filtered.data = filtered_data;
-            
-            source_sorted_filtered.data = createSortedData(filtered_data);
-            
-            source_filtered.change.emit();
-            source_sorted_filtered.change.emit();
-            """
-        )
+        // Update sorted filtered data by sorting the current window
+        source_sorted_gpu_a_filtered.data = createSortedData(gpu_a_filtered);
+        source_sorted_gpu_b_filtered.data = createSortedData(gpu_b_filtered);
         
-        slider_callback_gpu_b = CustomJS(
-            args=dict(
-                source=self.ds.source_gpu_b, 
-                source_filtered=self.ds.source_gpu_b_filtered, 
-                source_sorted_filtered=self.ds.source_sorted_gpu_b_filtered,
-                slider=self.slider_gpu_b,
-                spinner=self.window_size_spinner
-            ),
-            code=self._create_sorted_data_js() + """
-            const start = slider.value;
-            const window_size = spinner.value;
-            const end = Math.min(start + window_size, source.data['Kernel Index'].length);
-            
-            const filtered_data = {};
-            for (let key in source.data) {
-                filtered_data[key] = source.data[key].slice(start, end);
-            }
-            source_filtered.data = filtered_data;
-            
-            source_sorted_filtered.data = createSortedData(filtered_data);
-            
-            source_filtered.change.emit();
-            source_sorted_filtered.change.emit();
-            """
-        )
-        
-        # Combined callbacks (similar pattern)
-        slider_callback_gpu_a_combined = CustomJS(
-            args=dict(
-                source=self.ds.source_gpu_a, 
-                source_filtered=self.ds.source_gpu_a_combined_filtered,
-                source_sorted_filtered=self.ds.source_sorted_gpu_a_combined_filtered,
-                slider=self.slider_gpu_a_combined,
-                spinner=self.window_size_spinner_combined
-            ),
-            code=self._create_sorted_data_js() + """
-            const start = slider.value;
-            const window_size = spinner.value;
-            const end = Math.min(start + window_size, source.data['Kernel Index'].length);
-            
-            const filtered_data = {};
-            for (let key in source.data) {
-                filtered_data[key] = source.data[key].slice(start, end);
-            }
-            source_filtered.data = filtered_data;
-            
-            source_sorted_filtered.data = createSortedData(filtered_data);
-            
-            source_filtered.change.emit();
-            source_sorted_filtered.change.emit();
-            """
-        )
-        
-        slider_callback_gpu_b_combined = CustomJS(
-            args=dict(
-                source=self.ds.source_gpu_b, 
-                source_filtered=self.ds.source_gpu_b_combined_filtered,
-                source_sorted_filtered=self.ds.source_sorted_gpu_b_combined_filtered,
-                slider=self.slider_gpu_b_combined,
-                spinner=self.window_size_spinner_combined
-            ),
-            code=self._create_sorted_data_js() + """
-            const start = slider.value;
-            const window_size = spinner.value;
-            const end = Math.min(start + window_size, source.data['Kernel Index'].length);
-            
-            const filtered_data = {};
-            for (let key in source.data) {
-                filtered_data[key] = source.data[key].slice(start, end);
-            }
-            source_filtered.data = filtered_data;
-            
-            source_sorted_filtered.data = createSortedData(filtered_data);
-            
-            source_filtered.change.emit();
-            source_sorted_filtered.change.emit();
-            """
-        )
-        
-        # Attach slider callbacks
-        self.slider_gpu_a.js_on_change('value', slider_callback_gpu_a)
-        self.slider_gpu_b.js_on_change('value', slider_callback_gpu_b)
-        self.slider_gpu_a_combined.js_on_change('value', slider_callback_gpu_a_combined)
-        self.slider_gpu_b_combined.js_on_change('value', slider_callback_gpu_b_combined)
-
-
-class KernelDurationCalculator:
-    """Class to handle kernel duration calculations"""
-    
-    def __init__(self, data_sources, gpu_name_a="GPU_A", gpu_name_b="GPU_B"):
-        self.ds = data_sources
-        self.gpu_name_a = gpu_name_a
-        self.gpu_name_b = gpu_name_b
-        self._create_calculator_widgets()
-        self._setup_calculator_callbacks()
-    
-    def _create_calculator_widgets(self):
-        """Create calculator UI widgets"""
-        # Text input for kernel names
-        self.kernel_input_a = TextAreaInput(
-            value="", 
-            title=f"Paste {self.gpu_name_a} Kernel Names (one per line):",
-            rows=5, 
-            width=500,
-            placeholder="Paste kernel names here..."
-        )
-        
-        self.kernel_input_b = TextAreaInput(
-            value="", 
-            title=f"Paste {self.gpu_name_b} Kernel Names (one per line):",
-            rows=5, 
-            width=500,
-            placeholder="Paste kernel names here..."
-        )
-        
-        # Calculate buttons
-        self.calc_button_a = Button(label=f"Calculate {self.gpu_name_a} Total", button_type="success", width=200)
-        self.calc_button_b = Button(label=f"Calculate {self.gpu_name_b} Total", button_type="success", width=200)
-        
-        # Result displays
-        self.result_div_a = Div(text=f"<h4>{self.gpu_name_a} Results:</h4><p>Enter kernel names and click calculate</p>", width=500)
-        self.result_div_b = Div(text=f"<h4>{self.gpu_name_b} Results:</h4><p>Enter kernel names and click calculate</p>", width=500)
-        
-        # Combined calculator
-        self.kernel_input_combined = TextAreaInput(
-            value="", 
-            title="Paste Kernel Names (one per line) - will search both traces:",
-            rows=5, 
-            width=1000,
-            placeholder="Paste kernel names here..."
-        )
-        
-        self.calc_button_combined = Button(label="Calculate Both Traces", button_type="primary", width=200)
-        self.result_div_combined = Div(text="<h4>Combined Results:</h4><p>Enter kernel names and click calculate</p>", width=1000)
-    
-    def _setup_calculator_callbacks(self):
-        """Setup calculator callbacks"""
-        # GPU A calculator
-        calc_callback_a = CustomJS(
-            args=dict(
-                source=self.ds.source_gpu_a,
-                input_widget=self.kernel_input_a,
-                result_div=self.result_div_a,
-                gpu_name=self.gpu_name_a
-            ),
-            code="""
-            const kernel_names = input_widget.value.split('\\n').map(name => name.trim()).filter(name => name.length > 0);
-            
-            if (kernel_names.length === 0) {
-                result_div.text = `<h4>${gpu_name} Results:</h4><p style="color: red;">Please enter at least one kernel name</p>`;
-                return;
-            }
-            
-            const data = source.data;
-            let total_duration = 0;
-            let found_count = 0;
-            let results_html = `<h4>${gpu_name} Results:</h4>`;
-            
-            // Create a map for faster lookup
-            const kernel_durations = {};
-            for (let i = 0; i < data['Kernel Name'].length; i++) {
-                const name = data['Kernel Name'][i];
-                const duration = data['Duration (us)'][i];
-                if (kernel_durations[name]) {
-                    kernel_durations[name] += duration;
-                } else {
-                    kernel_durations[name] = duration;
-                }
-            }
-            
-            results_html += '<table style="border-collapse: collapse; width: 100%;">';
-            results_html += '<tr style="background-color: #f0f0f0;"><th style="border: 1px solid #ddd; padding: 8px;">Kernel Name</th><th style="border: 1px solid #ddd; padding: 8px;">Total Duration (μs)</th><th style="border: 1px solid #ddd; padding: 8px;">Status</th></tr>';
-            
-            for (let kernel_name of kernel_names) {
-                if (kernel_durations[kernel_name]) {
-                    const duration = kernel_durations[kernel_name].toFixed(3);
-                    total_duration += kernel_durations[kernel_name];
-                    found_count++;
-                    results_html += `<tr><td style="border: 1px solid #ddd; padding: 8px;">${kernel_name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${duration}</td><td style="border: 1px solid #ddd; padding: 8px; color: green;">Found</td></tr>`;
-                } else {
-                    results_html += `<tr><td style="border: 1px solid #ddd; padding: 8px;">${kernel_name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">0.000</td><td style="border: 1px solid #ddd; padding: 8px; color: red;">Not Found</td></tr>`;
-                }
-            }
-            
-            results_html += `<tr style="background-color: #e6f3ff; font-weight: bold;"><td style="border: 1px solid #ddd; padding: 8px;">TOTAL</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${total_duration.toFixed(3)}</td><td style="border: 1px solid #ddd; padding: 8px;">${found_count}/${kernel_names.length} found</td></tr>`;
-            results_html += '</table>';
-            
-            results_html += `<p><strong>Summary:</strong> Found ${found_count} out of ${kernel_names.length} kernels. Total duration: <strong>${total_duration.toFixed(3)} μs</strong></p>`;
-            
-            result_div.text = results_html;
-            """
-        )
-        
-        # GPU B calculator (similar)
-        calc_callback_b = CustomJS(
-            args=dict(
-                source=self.ds.source_gpu_b,
-                input_widget=self.kernel_input_b,
-                result_div=self.result_div_b,
-                gpu_name=self.gpu_name_b
-            ),
-            code="""
-            const kernel_names = input_widget.value.split('\\n').map(name => name.trim()).filter(name => name.length > 0);
-            
-            if (kernel_names.length === 0) {
-                result_div.text = `<h4>${gpu_name} Results:</h4><p style="color: red;">Please enter at least one kernel name</p>`;
-                return;
-            }
-            
-            const data = source.data;
-            let total_duration = 0;
-            let found_count = 0;
-            let results_html = `<h4>${gpu_name} Results:</h4>`;
-            
-            // Create a map for faster lookup
-            const kernel_durations = {};
-            for (let i = 0; i < data['Kernel Name'].length; i++) {
-                const name = data['Kernel Name'][i];
-                const duration = data['Duration (us)'][i];
-                if (kernel_durations[name]) {
-                    kernel_durations[name] += duration;
-                } else {
-                    kernel_durations[name] = duration;
-                }
-            }
-            
-            results_html += '<table style="border-collapse: collapse; width: 100%;">';
-            results_html += '<tr style="background-color: #f0f0f0;"><th style="border: 1px solid #ddd; padding: 8px;">Kernel Name</th><th style="border: 1px solid #ddd; padding: 8px;">Total Duration (μs)</th><th style="border: 1px solid #ddd; padding: 8px;">Status</th></tr>';
-            
-            for (let kernel_name of kernel_names) {
-                if (kernel_durations[kernel_name]) {
-                    const duration = kernel_durations[kernel_name].toFixed(3);
-                    total_duration += kernel_durations[kernel_name];
-                    found_count++;
-                    results_html += `<tr><td style="border: 1px solid #ddd; padding: 8px;">${kernel_name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${duration}</td><td style="border: 1px solid #ddd; padding: 8px; color: green;">Found</td></tr>`;
-                } else {
-                    results_html += `<tr><td style="border: 1px solid #ddd; padding: 8px;">${kernel_name}</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">0.000</td><td style="border: 1px solid #ddd; padding: 8px; color: red;">Not Found</td></tr>`;
-                }
-            }
-            
-            results_html += `<tr style="background-color: #e6f3ff; font-weight: bold;"><td style="border: 1px solid #ddd; padding: 8px;">TOTAL</td><td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${total_duration.toFixed(3)}</td><td style="border: 1px solid #ddd; padding: 8px;">${found_count}/${kernel_names.length} found</td></tr>`;
-            results_html += '</table>';
-            
-            results_html += `<p><strong>Summary:</strong> Found ${found_count} out of ${kernel_names.length} kernels. Total duration: <strong>${total_duration.toFixed(3)} μs</strong></p>`;
-            
-            result_div.text = results_html;
-            """
-        )
-        
-        # Combined calculator
-        calc_callback_combined = CustomJS(
-            args=dict(
-                source_a=self.ds.source_gpu_a,
-                source_b=self.ds.source_gpu_b,
-                input_widget=self.kernel_input_combined,
-                result_div=self.result_div_combined,
-                gpu_name_a=self.gpu_name_a,
-                gpu_name_b=self.gpu_name_b
-            ),
-            code="""
-            const kernel_names = input_widget.value.split('\\n').map(name => name.trim()).filter(name => name.length > 0);
-            
-            if (kernel_names.length === 0) {
-                result_div.text = '<h4>Combined Results:</h4><p style="color: red;">Please enter at least one kernel name</p>';
-                return;
-            }
-            
-            // Process GPU A
-            const data_a = source_a.data;
-            const kernel_durations_a = {};
-            for (let i = 0; i < data_a['Kernel Name'].length; i++) {
-                const name = data_a['Kernel Name'][i];
-                const duration = data_a['Duration (us)'][i];
-                if (kernel_durations_a[name]) {
-                    kernel_durations_a[name] += duration;
-                } else {
-                    kernel_durations_a[name] = duration;
-                }
-            }
-            
-            // Process GPU B
-            const data_b = source_b.data;
-            const kernel_durations_b = {};
-            for (let i = 0; i < data_b['Kernel Name'].length; i++) {
-                const name = data_b['Kernel Name'][i];
-                const duration = data_b['Duration (us)'][i];
-                if (kernel_durations_b[name]) {
-                    kernel_durations_b[name] += duration;
-                } else {
-                    kernel_durations_b[name] = duration;
-                }
-            }
-            
-            let total_duration_a = 0;
-            let total_duration_b = 0;
-            let found_count_a = 0;
-            let found_count_b = 0;
-            
-            let results_html = '<h4>Combined Results:</h4>';
-            results_html += '<table style="border-collapse: collapse; width: 100%;">';
-            results_html += `<tr style="background-color: #f0f0f0;"><th style="border: 1px solid #ddd; padding: 8px;">Kernel Name</th><th style="border: 1px solid #ddd; padding: 8px;">${gpu_name_a} Duration (μs)</th><th style="border: 1px solid #ddd; padding: 8px;">${gpu_name_b} Duration (μs)</th><th style="border: 1px solid #ddd; padding: 8px;">Difference (μs)</th><th style="border: 1px solid #ddd; padding: 8px;">Ratio (A/B)</th></tr>`;
-            
-            for (let kernel_name of kernel_names) {
-                const duration_a = kernel_durations_a[kernel_name] || 0;
-                const duration_b = kernel_durations_b[kernel_name] || 0;
-                const difference = duration_a - duration_b;
-                const ratio = duration_b > 0 ? (duration_a / duration_b) : 'N/A';
-                
-                if (duration_a > 0) {
-                    total_duration_a += duration_a;
-                    found_count_a++;
-                }
-                if (duration_b > 0) {
-                    total_duration_b += duration_b;
-                    found_count_b++;
-                }
-                
-                const ratio_text = ratio === 'N/A' ? 'N/A' : ratio.toFixed(3);
-                const difference_color = difference > 0 ? 'color: red;' : difference < 0 ? 'color: green;' : '';
-                
-                results_html += `<tr>
-                    <td style="border: 1px solid #ddd; padding: 8px;">${kernel_name}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${duration_a.toFixed(3)}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${duration_b.toFixed(3)}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px; text-align: right; ${difference_color}">${difference.toFixed(3)}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${ratio_text}</td>
-                </tr>`;
-            }
-            
-            const total_difference = total_duration_a - total_duration_b;
-            const total_ratio = total_duration_b > 0 ? (total_duration_a / total_duration_b).toFixed(3) : 'N/A';
-            const total_difference_color = total_difference > 0 ? 'color: red;' : total_difference < 0 ? 'color: green;' : '';
-            
-            results_html += `<tr style="background-color: #e6f3ff; font-weight: bold;">
-                <td style="border: 1px solid #ddd; padding: 8px;">TOTAL</td>
-                <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${total_duration_a.toFixed(3)}</td>
-                <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${total_duration_b.toFixed(3)}</td>
-                <td style="border: 1px solid #ddd; padding: 8px; text-align: right; ${total_difference_color}">${total_difference.toFixed(3)}</td>
-                <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">${total_ratio}</td>
-            </tr>`;
-            results_html += '</table>';
-            
-            results_html += `<p><strong>Summary:</strong></p>`;
-            results_html += `<p>${gpu_name_a}: Found ${found_count_a}/${kernel_names.length} kernels, Total: <strong>${total_duration_a.toFixed(3)} μs</strong></p>`;
-            results_html += `<p>${gpu_name_b}: Found ${found_count_b}/${kernel_names.length} kernels, Total: <strong>${total_duration_b.toFixed(3)} μs</strong></p>`;
-            results_html += `<p>Difference: <strong style="${total_difference_color}">${total_difference.toFixed(3)} μs</strong></p>`;
-            
-            result_div.text = results_html;
-            """
-        )
-        
-        # Attach callbacks
-        self.calc_button_a.js_on_click(calc_callback_a)
-        self.calc_button_b.js_on_click(calc_callback_b)
-        self.calc_button_combined.js_on_click(calc_callback_combined)
-
-
-class TableManager:
-    """Class to manage data tables"""
-    
-    def __init__(self, data_sources, control_manager, chart_manager):
-        self.ds = data_sources
-        self.controls = control_manager
-        self.charts = chart_manager
-        self.tables = {}
-        self.copy_buttons = {}
-        self._create_tables()
-        self._setup_table_interactions()
-        self._create_copy_buttons()
-    
-    def _create_table_columns(self):
-        """Create standard table columns"""
-        return [
-            TableColumn(field="Kernel Index", title="Index", width=80),
-            TableColumn(field="Kernel Source", title="Source", width=150),
-            TableColumn(field="Kernel Name", title="Kernel Name", width=450),
-            TableColumn(field="Start (us)", title="Start (μs)", width=100, 
-                       formatter=NumberFormatter(format="0,0.000")),
-            TableColumn(field="Duration (us)", title="Duration (μs)", width=120, 
-                       formatter=NumberFormatter(format="0,0.000")),
-            TableColumn(field="End (us)", title="End (μs)", width=100, 
-                       formatter=NumberFormatter(format="0,0.000")),
-        ]
-    
-    def _create_top_columns(self):
-        """Create top N table columns"""
-        return [
-            TableColumn(field="Kernel Name", title="Kernel Name", width=680),
-            TableColumn(field="Total Duration (us)", title="Total Duration (μs)", width=120,
-                       formatter=NumberFormatter(format="0,0.000")),
-            TableColumn(field="Count", title="Count", width=60),
-            TableColumn(field="Avg Duration (us)", title="Avg Duration (μs)", width=120,
-                       formatter=NumberFormatter(format="0,0.000")),
-        ]
-    
-    def _create_tables(self):
-        """Create all data tables"""
-        columns = self._create_table_columns()
-        top_columns = self._create_top_columns()
-        
-        # Individual view tables
-        self.tables['gpu_a'] = DataTable(source=self.ds.source_gpu_a_filtered, columns=columns, 
-                                        width=2000, height=600, index_position=None, selectable=True)
-        self.tables['gpu_b'] = DataTable(source=self.ds.source_gpu_b_filtered, columns=columns, 
-                                        width=2000, height=600, index_position=None, selectable=True)
-        
-        # Sorted tables
-        self.tables['sorted_gpu_a'] = DataTable(source=self.ds.source_sorted_gpu_a_filtered, columns=columns, 
-                                               width=2000, height=600, index_position=None, selectable=True)
-        self.tables['sorted_gpu_b'] = DataTable(source=self.ds.source_sorted_gpu_b_filtered, columns=columns, 
-                                               width=2000, height=600, index_position=None, selectable=True)
-        
-        # Combined view tables
-        self.tables['gpu_a_combined'] = DataTable(source=self.ds.source_gpu_a_combined_filtered, columns=columns, 
-                                                 width=1000, height=600, index_position=None, selectable=True)
-        self.tables['gpu_b_combined'] = DataTable(source=self.ds.source_gpu_b_combined_filtered, columns=columns, 
-                                                 width=1000, height=600, index_position=None, selectable=True)
-        
-        # Combined sorted tables
-        self.tables['sorted_gpu_a_combined'] = DataTable(source=self.ds.source_sorted_gpu_a_combined_filtered, columns=columns, 
-                                                        width=1000, height=600, index_position=None, selectable=True)
-        self.tables['sorted_gpu_b_combined'] = DataTable(source=self.ds.source_sorted_gpu_b_combined_filtered, columns=columns, 
-                                                        width=1000, height=600, index_position=None, selectable=True)
-        
-        # Top N tables
-        self.tables['top_gpu_a'] = DataTable(source=self.ds.source_top_gpu_a, columns=top_columns, 
-                                           width=2000, height=600, index_position=None, selectable=True)
-        self.tables['top_gpu_b'] = DataTable(source=self.ds.source_top_gpu_b, columns=top_columns, 
-                                            width=2000, height=600, index_position=None, selectable=True)
-        self.tables['top_both'] = DataTable(source=self.ds.source_top_both, columns=top_columns, 
-                                          width=800, height=300, index_position=None, selectable=True)
-        
-        # Combined top N tables
-        self.tables['top_gpu_a_combined'] = DataTable(source=self.ds.source_top_gpu_a, columns=top_columns, 
-                                                     width=1000, height=600, index_position=None, selectable=True)
-        self.tables['top_gpu_b_combined'] = DataTable(source=self.ds.source_top_gpu_b, columns=top_columns, 
-                                                     width=1000, height=600, index_position=None, selectable=True)
-    
-    def _create_copy_js(self, columns, with_headers=True):
-        """Create JavaScript for copying table data to clipboard in Excel-friendly format"""
-        if columns == 'top':
-            cols = ['Kernel Name', 'Total Duration (us)', 'Count', 'Avg Duration (us)']
-        else:
-            cols = ['Kernel Index', 'Kernel Source', 'Kernel Name', 'Start (us)', 'Duration (us)', 'End (us)']
-        
-        header_line = '"' + '"\t"'.join(cols) + '"' if with_headers else '';
-        
-        return f"""
-        const data = source.data;
-        const length = data['{cols[0]}'].length;
-        let text = '{header_line}';
-        
-        for (let i = 0; i < length; i++) {{
-            if (text && text !== '') text += '\\n';
-            const row = [];
-            {chr(10).join([f'row.push(String(data["{col}"][i]));' for col in cols])}
-            text += '"' + row.join('"\\t"') + '"';
-        }}
-        
-        navigator.clipboard.writeText(text).then(function() {{
-            console.log('Table data copied to clipboard');
-            button.label = 'Copied!';
-            setTimeout(() => {{ button.label = 'Copy Table'; }}, 2000);
-        }}).catch(function(err) {{
-            console.error('Could not copy data: ', err);
-            button.label = 'Copy Failed';
-            setTimeout(() => {{ button.label = 'Copy Table'; }}, 2000);
-        }});
+        source_gpu_a_filtered.change.emit();
+        source_gpu_b_filtered.change.emit();
+        source_sorted_gpu_a_filtered.change.emit();
+        source_sorted_gpu_b_filtered.change.emit();
         """
+    )
     
-    def _create_copy_buttons(self):
-        """Create copy buttons for all tables"""
-        # Individual view copy buttons
-        self.copy_buttons['gpu_a'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['gpu_a'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_gpu_a_filtered, button=self.copy_buttons['gpu_a']),
-            code=self._create_copy_js('standard')
-        ))
+    # Callback for combined view
+    window_size_callback_combined = CustomJS(
+        args=dict(
+            spinner=window_size_spinner_combined,
+            slider_gpu_a=slider_gpu_a_combined,
+            slider_gpu_b=slider_gpu_b_combined,
+            source_gpu_a=source_gpu_a,
+            source_gpu_b=source_gpu_b,
+            source_gpu_a_filtered=source_gpu_a_combined_filtered,
+            source_gpu_b_filtered=source_gpu_b_combined_filtered,
+            source_sorted_gpu_a_filtered=source_sorted_gpu_a_combined_filtered,
+            source_sorted_gpu_b_filtered=source_sorted_gpu_b_combined_filtered,
+            gpu_name_a=gpu_name_a,
+            gpu_name_b=gpu_name_b
+        ),
+        code=create_sorted_data_js() + """
+        const window_size = spinner.value;
         
-        self.copy_buttons['gpu_b'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['gpu_b'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_gpu_b_filtered, button=self.copy_buttons['gpu_b']),
-            code=self._create_copy_js('standard')
-        ))
+        slider_gpu_a.step = window_size;
+        slider_gpu_b.step = window_size;
+        slider_gpu_a.end = Math.max(0, source_gpu_a.data['Kernel Index'].length - window_size);
+        slider_gpu_b.end = Math.max(0, source_gpu_b.data['Kernel Index'].length - window_size);
+        slider_gpu_a.title = `${gpu_name_a} Kernel Index Window (showing ${window_size} at a time)`;
+        slider_gpu_b.title = `${gpu_name_b} Kernel Index Window (showing ${window_size} at a time)`;
         
-        # Sorted tables copy buttons
-        self.copy_buttons['sorted_gpu_a'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['sorted_gpu_a'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_sorted_gpu_a_filtered, button=self.copy_buttons['sorted_gpu_a']),
-            code=self._create_copy_js('standard')
-        ))
+        const start_gpu_a = slider_gpu_a.value;
+        const end_gpu_a = Math.min(start_gpu_a + window_size, source_gpu_a.data['Kernel Index'].length);
         
-        self.copy_buttons['sorted_gpu_b'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['sorted_gpu_b'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_sorted_gpu_b_filtered, button=self.copy_buttons['sorted_gpu_b']),
-            code=self._create_copy_js('standard')
-        ))
+        const start_gpu_b = slider_gpu_b.value;
+        const end_gpu_b = Math.min(start_gpu_b + window_size, source_gpu_b.data['Kernel Index'].length);
         
-        # Top N tables copy buttons
-        self.copy_buttons['top_gpu_a'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['top_gpu_a'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_top_gpu_a, button=self.copy_buttons['top_gpu_a']),
-            code=self._create_copy_js('top')
-        ))
+        const gpu_a_filtered = {};
+        for (let key in source_gpu_a.data) {
+            gpu_a_filtered[key] = source_gpu_a.data[key].slice(start_gpu_a, end_gpu_a);
+        }
+        source_gpu_a_filtered.data = gpu_a_filtered;
         
-        self.copy_buttons['top_gpu_b'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['top_gpu_b'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_top_gpu_b, button=self.copy_buttons['top_gpu_b']),
-            code=self._create_copy_js('top')
-        ))
+        const gpu_b_filtered = {};
+        for (let key in source_gpu_b.data) {
+            gpu_b_filtered[key] = source_gpu_b.data[key].slice(start_gpu_b, end_gpu_b);
+        }
+        source_gpu_b_filtered.data = gpu_b_filtered;
         
-        # Combined view copy buttons
-        self.copy_buttons['gpu_a_combined'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['gpu_a_combined'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_gpu_a_combined_filtered, button=self.copy_buttons['gpu_a_combined']),
-            code=self._create_copy_js('standard')
-        ))
+        source_sorted_gpu_a_filtered.data = createSortedData(gpu_a_filtered);
+        source_sorted_gpu_b_filtered.data = createSortedData(gpu_b_filtered);
         
-        self.copy_buttons['gpu_b_combined'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['gpu_b_combined'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_gpu_b_combined_filtered, button=self.copy_buttons['gpu_b_combined']),
-            code=self._create_copy_js('standard')
-        ))
-        
-        self.copy_buttons['sorted_gpu_a_combined'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['sorted_gpu_a_combined'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_sorted_gpu_a_combined_filtered, button=self.copy_buttons['sorted_gpu_a_combined']),
-            code=self._create_copy_js('standard')
-        ))
-        
-        self.copy_buttons['sorted_gpu_b_combined'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['sorted_gpu_b_combined'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_sorted_gpu_b_combined_filtered, button=self.copy_buttons['sorted_gpu_b_combined']),
-            code=self._create_copy_js('standard')
-        ))
-        
-        self.copy_buttons['top_gpu_a_combined'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['top_gpu_a_combined'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_top_gpu_a, button=self.copy_buttons['top_gpu_a_combined']),
-            code=self._create_copy_js('top')
-        ))
-        
-        self.copy_buttons['top_gpu_b_combined'] = Button(label="Copy Table", width=100, button_type="primary")
-        self.copy_buttons['top_gpu_b_combined'].js_on_click(CustomJS(
-            args=dict(source=self.ds.source_top_gpu_b, button=self.copy_buttons['top_gpu_b_combined']),
-            code=self._create_copy_js('top')
-        ))
+        source_gpu_a_filtered.change.emit();
+        source_gpu_b_filtered.change.emit();
+        source_sorted_gpu_a_filtered.change.emit();
+        source_sorted_gpu_b_filtered.change.emit();
+        """
+    )
     
-    def _setup_table_interactions(self):
-        """Setup table interaction callbacks"""
-        # Bar click callbacks to highlight table rows for both bar and timeline charts
-        tap_callback_gpu_a = CustomJS(
-            args=dict(source=self.ds.source_gpu_a_filtered, 
-                     table=self.tables['gpu_a'], 
-                     sorted_table=self.tables['sorted_gpu_a']),
-            code="""
-            const indices = source.selected.indices;
-            if (indices.length > 0) {
-                table.source.selected.indices = indices;
-                sorted_table.source.selected.indices = indices;
-                const row_height = 25;
-                const scroll_top = indices[0] * row_height;
-                table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
-                sorted_table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
-            }
-            """
-        )
-        
-        tap_callback_gpu_b = CustomJS(
-            args=dict(source=self.ds.source_gpu_b_filtered, 
-                     table=self.tables['gpu_b'], 
-                     sorted_table=self.tables['sorted_gpu_b']),
-            code="""
-            const indices = source.selected.indices;
-            if (indices.length > 0) {
-                table.source.selected.indices = indices;
-                sorted_table.source.selected.indices = indices;
-                const row_height = 25;
-                const scroll_top = indices[0] * row_height;
-                table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
-                sorted_table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
-            }
-            """
-        )
-        
-        # Combined tap callbacks
-        tap_callback_gpu_a_combined = CustomJS(
-            args=dict(source=self.ds.source_gpu_a_combined_filtered, 
-                     table=self.tables['gpu_a_combined'], 
-                     sorted_table=self.tables['sorted_gpu_a_combined']),
-            code="""
-            const indices = source.selected.indices;
-            if (indices.length > 0) {
-                table.source.selected.indices = indices;
-                sorted_table.source.selected.indices = indices;
-                const row_height = 25;
-                const scroll_top = indices[0] * row_height;
-                table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
-                sorted_table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
-            }
-            """
-        )
-        
-        tap_callback_gpu_b_combined = CustomJS(
-            args=dict(source=self.ds.source_gpu_b_combined_filtered, 
-                     table=self.tables['gpu_b_combined'], 
-                     sorted_table=self.tables['sorted_gpu_b_combined']),
-            code="""
-            const indices = source.selected.indices;
-            if (indices.length > 0) {
-                table.source.selected.indices = indices;
-                sorted_table.source.selected.indices = indices;
-                const row_height = 25;
-                const scroll_top = indices[0] * row_height;
-                table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
-                sorted_table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
-            }
-            """
-        )
-        
-        # Attach callbacks to both bar and timeline charts
-        self.charts.bars['gpu_a'].data_source.selected.js_on_change('indices', tap_callback_gpu_a)
-        self.charts.bars['gpu_b'].data_source.selected.js_on_change('indices', tap_callback_gpu_b)
-        self.charts.bars['gpu_a_combined'].data_source.selected.js_on_change('indices', tap_callback_gpu_a_combined)
-        self.charts.bars['gpu_b_combined'].data_source.selected.js_on_change('indices', tap_callback_gpu_b_combined)
-        
-        # Timeline chart callbacks
-        self.charts.timeline_bars['gpu_a'].data_source.selected.js_on_change('indices', tap_callback_gpu_a)
-        self.charts.timeline_bars['gpu_b'].data_source.selected.js_on_change('indices', tap_callback_gpu_b)
-        self.charts.timeline_bars['gpu_a_combined'].data_source.selected.js_on_change('indices', tap_callback_gpu_a_combined)
-        self.charts.timeline_bars['gpu_b_combined'].data_source.selected.js_on_change('indices', tap_callback_gpu_b_combined)
-
-
-class DashboardBuilder:
-    """Main class to build the complete dashboard"""
+    # Attach window size callbacks
+    window_size_spinner.js_on_change('value', window_size_callback)
+    window_size_spinner_combined.js_on_change('value', window_size_callback_combined)
     
-    def __init__(self, trace_path1, trace_path2, gpu_name_a="GPU_A", gpu_name_b="GPU_B"):
-        self.trace_analyzer_a = TraceAnalyzer(trace_path1)
-        self.trace_analyzer_b = TraceAnalyzer(trace_path2)
-        self.gpu_name_a = gpu_name_a
-        self.gpu_name_b = gpu_name_b
+    # JavaScript callbacks for sliding windows
+    slider_callback_gpu_a = CustomJS(
+        args=dict(
+            source=source_gpu_a, 
+            source_filtered=source_gpu_a_filtered, 
+            source_sorted_filtered=source_sorted_gpu_a_filtered,
+            slider=slider_gpu_a,
+            spinner=window_size_spinner
+        ),
+        code=create_sorted_data_js() + """
+        const start = slider.value;
+        const window_size = spinner.value;
+        const end = Math.min(start + window_size, source.data['Kernel Index'].length);
         
-        # Initialize components
-        self.data_sources = DataSourceManager(self.trace_analyzer_a, self.trace_analyzer_b)
-        self.chart_manager = ChartManager(self.data_sources, gpu_name_a, gpu_name_b)
-        self.control_manager = ControlManager(self.data_sources, self.chart_manager, gpu_name_a, gpu_name_b)
-        self.table_manager = TableManager(self.data_sources, self.control_manager, self.chart_manager)
-        self.duration_calculator = KernelDurationCalculator(self.data_sources, gpu_name_a, gpu_name_b)
+        const filtered_data = {};
+        for (let key in source.data) {
+            filtered_data[key] = source.data[key].slice(start, end);
+        }
+        source_filtered.data = filtered_data;
+        
+        // Create sorted version of the current window
+        source_sorted_filtered.data = createSortedData(filtered_data);
+        
+        source_filtered.change.emit();
+        source_sorted_filtered.change.emit();
+        """
+    )
     
-    def _create_chart_container(self, charts, timeline_charts, key):
-        """Create a container that can show either bar or timeline chart"""
-        container = column(charts[key], timeline_charts[key])
-        # Initially show only bar chart
-        timeline_charts[key].visible = False
-        return container
+    slider_callback_gpu_b = CustomJS(
+        args=dict(
+            source=source_gpu_b, 
+            source_filtered=source_gpu_b_filtered, 
+            source_sorted_filtered=source_sorted_gpu_b_filtered,
+            slider=slider_gpu_b,
+            spinner=window_size_spinner
+        ),
+        code=create_sorted_data_js() + """
+        const start = slider.value;
+        const window_size = spinner.value;
+        const end = Math.min(start + window_size, source.data['Kernel Index'].length);
+        
+        const filtered_data = {};
+        for (let key in source.data) {
+            filtered_data[key] = source.data[key].slice(start, end);
+        }
+        source_filtered.data = filtered_data;
+        
+        source_sorted_filtered.data = createSortedData(filtered_data);
+        
+        source_filtered.change.emit();
+        source_sorted_filtered.change.emit();
+        """
+    )
     
-    def create_layout(self):
-        """Create the complete dashboard layout"""
-        # Create spacer div for left margin
-        spacer = Div(text="", width=50, height=10)
+    # Combined callbacks
+    slider_callback_gpu_a_combined = CustomJS(
+        args=dict(
+            source=source_gpu_a, 
+            source_filtered=source_gpu_a_combined_filtered,
+            source_sorted_filtered=source_sorted_gpu_a_combined_filtered,
+            slider=slider_gpu_a_combined,
+            spinner=window_size_spinner_combined
+        ),
+        code=create_sorted_data_js() + """
+        const start = slider.value;
+        const window_size = spinner.value;
+        const end = Math.min(start + window_size, source.data['Kernel Index'].length);
         
-        # GPU A layout with left spacing
-        gpu_a_chart_container = self._create_chart_container(
-            self.chart_manager.charts, self.chart_manager.timeline_charts, 'gpu_a')
+        const filtered_data = {};
+        for (let key in source.data) {
+            filtered_data[key] = source.data[key].slice(start, end);
+        }
+        source_filtered.data = filtered_data;
         
-        gpu_a_layout = column(
-            row(spacer, Div(text=f"<h2>{self.gpu_name_a} Kernel Analysis</h2>")),
-            row(spacer, self.control_manager.chart_type_select, self.control_manager.window_size_spinner, self.control_manager.slider_gpu_a),
-            row(spacer, gpu_a_chart_container),
-            row(spacer, Div(text="<h3>Kernel Details</h3>"), self.table_manager.copy_buttons['gpu_a']),
-            row(spacer, self.table_manager.tables['gpu_a']),
-            row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"), self.table_manager.copy_buttons['sorted_gpu_a']),
-            row(spacer, self.table_manager.tables['sorted_gpu_a']),
-            row(spacer, Div(text="<h3>Top N Kernels by Total Duration</h3>"), self.table_manager.copy_buttons['top_gpu_a']),
-            row(spacer, self.table_manager.tables['top_gpu_a']),
-            row(spacer, Div(text="<h3>Duration Calculator</h3>")),
-            row(spacer, self.duration_calculator.kernel_input_a),
-            row(spacer, self.duration_calculator.calc_button_a),
-            row(spacer, self.duration_calculator.result_div_a)
-        )
+        source_sorted_filtered.data = createSortedData(filtered_data);
         
-        # GPU B layout with left spacing
-        gpu_b_chart_container = self._create_chart_container(
-            self.chart_manager.charts, self.chart_manager.timeline_charts, 'gpu_b')
+        source_filtered.change.emit();
+        source_sorted_filtered.change.emit();
+        """
+    )
+    
+    slider_callback_gpu_b_combined = CustomJS(
+        args=dict(
+            source=source_gpu_b, 
+            source_filtered=source_gpu_b_combined_filtered,
+            source_sorted_filtered=source_sorted_gpu_b_combined_filtered,
+            slider=slider_gpu_b_combined,
+            spinner=window_size_spinner_combined
+        ),
+        code=create_sorted_data_js() + """
+        const start = slider.value;
+        const window_size = spinner.value;
+        const end = Math.min(start + window_size, source.data['Kernel Index'].length);
         
-        gpu_b_layout = column(
-            row(spacer, Div(text=f"<h2>{self.gpu_name_b} Kernel Analysis</h2>")),
-            row(spacer, self.control_manager.chart_type_select, self.control_manager.window_size_spinner, self.control_manager.slider_gpu_b),
-            row(spacer, gpu_b_chart_container),
-            row(spacer, Div(text="<h3>Kernel Details Table</h3>"), self.table_manager.copy_buttons['gpu_b']),
-            row(spacer, self.table_manager.tables['gpu_b']),
-            row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"), self.table_manager.copy_buttons['sorted_gpu_b']),
-            row(spacer, self.table_manager.tables['sorted_gpu_b']),
-            row(spacer, Div(text="<h3>Top 10 Kernels by Total Duration</h3>"), self.table_manager.copy_buttons['top_gpu_b']),
-            row(spacer, self.table_manager.tables['top_gpu_b']),
-            row(spacer, Div(text="<h3>Duration Calculator</h3>")),
-            row(spacer, self.duration_calculator.kernel_input_b),
-            row(spacer, self.duration_calculator.calc_button_b),
-            row(spacer, self.duration_calculator.result_div_b)
-        )
+        const filtered_data = {};
+        for (let key in source.data) {
+            filtered_data[key] = source.data[key].slice(start, end);
+        }
+        source_filtered.data = filtered_data;
         
-        # Combined layout with left spacing
-        gpu_a_combined_container = self._create_chart_container(
-            self.chart_manager.charts, self.chart_manager.timeline_charts, 'gpu_a_combined')
-        gpu_b_combined_container = self._create_chart_container(
-            self.chart_manager.charts, self.chart_manager.timeline_charts, 'gpu_b_combined')
+        source_sorted_filtered.data = createSortedData(filtered_data);
         
-        both_layout = column(
-            row(spacer, Div(text="<h2>Side by Side Comparison</h2>")),        
-            row(spacer, self.control_manager.chart_type_select_combined, self.control_manager.window_size_spinner_combined),
-            row(spacer, self.control_manager.slider_gpu_a_combined, self.control_manager.slider_gpu_b_combined),
-            row(spacer, gpu_a_combined_container, gpu_b_combined_container),
-            row(spacer, Div(text="<h3>Kernel Details Tables</h3>")),
-            row(spacer,
-                column(Div(text=f"<h4>{self.gpu_name_a} Kernels</h4>"), 
-                       row(self.table_manager.copy_buttons['gpu_a_combined']), 
-                       self.table_manager.tables['gpu_a_combined']),
-                column(Div(text=f"<h4>{self.gpu_name_b} Kernels</h4>"), 
-                       row(self.table_manager.copy_buttons['gpu_b_combined']), 
-                       self.table_manager.tables['gpu_b_combined'])
-            ),
-            row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>")),
-            row(spacer,
-                column(Div(text=f"<h4>{self.gpu_name_a} Sorted by Latency</h4>"), 
-                       row(self.table_manager.copy_buttons['sorted_gpu_a_combined']), 
-                       self.table_manager.tables['sorted_gpu_a_combined']),
-                column(Div(text=f"<h4>{self.gpu_name_b} Sorted by Latency</h4>"), 
-                       row(self.table_manager.copy_buttons['sorted_gpu_b_combined']), 
-                       self.table_manager.tables['sorted_gpu_b_combined'])
-            ),
-            row(spacer, Div(text="<h3>Top 10 Kernels Comparison</h3>")),
-            row(spacer,
-                column(Div(text=f"<h4>{self.gpu_name_a} Top Kernels</h4>"), 
-                       row(self.table_manager.copy_buttons['top_gpu_a_combined']), 
-                       self.table_manager.tables['top_gpu_a_combined']),
-                column(Div(text=f"<h4>{self.gpu_name_b} Top Kernels</h4>"), 
-                       row(self.table_manager.copy_buttons['top_gpu_b_combined']), 
-                       self.table_manager.tables['top_gpu_b_combined'])
-            ),
-        )
-        
-        # Create tabs
-        tab1 = TabPanel(child=gpu_a_layout, title=self.gpu_name_a)
-        tab2 = TabPanel(child=gpu_b_layout, title=self.gpu_name_b) 
-        tab3 = TabPanel(child=both_layout, title="Side-by-Side Comparison")
-        
-        tabs = Tabs(tabs=[tab1, tab2, tab3])
-        
-        # Add overall left margin to the entire dashboard
-        main_spacer = Div(text="", width=30, height=10)
-        
-        return row(main_spacer, column(tabs))
-
-
-def create_visualization(trace_path1, trace_path2, gpu_name_a="GPU_A", gpu_name_b="GPU_B"):
-    """Create visualization using the new class-based approach"""
-    dashboard = DashboardBuilder(trace_path1, trace_path2, gpu_name_a, gpu_name_b)
-    return dashboard.create_layout()
-
+        source_filtered.change.emit();
+        source_sorted_filtered.change.emit();
+        """
+    )
+    
+    # Bar click callbacks to highlight table rows 
+    tap_callback_gpu_a = CustomJS(
+        args=dict(source=source_gpu_a_filtered, table=table_gpu_a, sorted_table=sorted_table_gpu_a),
+        code="""
+        const indices = source.selected.indices;
+        if (indices.length > 0) {
+            table.source.selected.indices = indices;
+            sorted_table.source.selected.indices = indices;
+            const row_height = 25;
+            const scroll_top = indices[0] * row_height;
+            table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
+            sorted_table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
+        }
+        """
+    )
+    
+    tap_callback_gpu_b = CustomJS(
+        args=dict(source=source_gpu_b_filtered, table=table_gpu_b, sorted_table=sorted_table_gpu_b),
+        code="""
+        const indices = source.selected.indices;
+        if (indices.length > 0) {
+            table.source.selected.indices = indices;
+            sorted_table.source.selected.indices = indices;
+            const row_height = 25;
+            const scroll_top = indices[0] * row_height;
+            table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
+            sorted_table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
+        }
+        """
+    )
+    
+    # Combined tap callbacks
+    tap_callback_gpu_a_combined = CustomJS(
+        args=dict(source=source_gpu_a_combined_filtered, table=table_gpu_a_combined, sorted_table=sorted_table_gpu_a_combined),
+        code="""
+        const indices = source.selected.indices;
+        if (indices.length > 0) {
+            table.source.selected.indices = indices;
+            sorted_table.source.selected.indices = indices;
+            const row_height = 25;
+            const scroll_top = indices[0] * row_height;
+            table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
+            sorted_table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
+        }
+        """
+    )
+    
+    tap_callback_gpu_b_combined = CustomJS(
+        args=dict(source=source_gpu_b_combined_filtered, table=table_gpu_b_combined, sorted_table=sorted_table_gpu_b_combined),
+        code="""
+        const indices = source.selected.indices;
+        if (indices.length > 0) {
+            table.source.selected.indices = indices;
+            sorted_table.source.selected.indices = indices;
+            const row_height = 25;
+            const scroll_top = indices[0] * row_height;
+            table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
+            sorted_table.view.el.querySelector('.slick-viewport').scrollTop = scroll_top;
+        }
+        """
+    )
+    
+    # Attach callbacks
+    slider_gpu_a.js_on_change('value', slider_callback_gpu_a)
+    slider_gpu_b.js_on_change('value', slider_callback_gpu_b)
+    slider_gpu_a_combined.js_on_change('value', slider_callback_gpu_a_combined)
+    slider_gpu_b_combined.js_on_change('value', slider_callback_gpu_b_combined)
+    
+    bars_gpu_a.data_source.selected.js_on_change('indices', tap_callback_gpu_a)
+    bars_gpu_b.data_source.selected.js_on_change('indices', tap_callback_gpu_b)
+    bars_gpu_a_combined.data_source.selected.js_on_change('indices', tap_callback_gpu_a_combined)
+    bars_gpu_b_combined.data_source.selected.js_on_change('indices', tap_callback_gpu_b_combined)
+    
+    # Create layouts for each tab
+    gpu_a_layout = column(
+        Div(text=f"<h2>{gpu_name_a} Kernel Analysis</h2>"),
+        row(window_size_spinner, slider_gpu_a),
+        chart_gpu_a,
+        Div(text="<h3>Kernel Details Table</h3>"),
+        table_gpu_a,
+        Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"),
+        sorted_table_gpu_a,
+        Div(text="<h3>Top 10 Kernels by Total Duration</h3>"),
+        top_table_gpu_a
+    )
+    
+    gpu_b_layout = column(
+        Div(text=f"<h2>{gpu_name_b} Kernel Analysis</h2>"),
+        row(window_size_spinner, slider_gpu_b),
+        chart_gpu_b,
+        Div(text="<h3>Kernel Details Table</h3>"),
+        table_gpu_b,
+        Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"),
+        sorted_table_gpu_b,
+        Div(text="<h3>Top 10 Kernels by Total Duration</h3>"),
+        top_table_gpu_b
+    )
+    
+    # Updated combined layout with side-by-side comparison
+    both_layout = column(
+        Div(text="<h2>Side by Side Comparison</h2>"),        
+        row(window_size_spinner_combined),
+        row(slider_gpu_a_combined, slider_gpu_b_combined),
+        row(chart_gpu_a_combined, chart_gpu_b_combined),
+        Div(text="<h3>Kernel Details Tables</h3>"),
+        row(
+            column(Div(text=f"<h4>{gpu_name_a} Kernels</h4>"), table_gpu_a_combined),
+            column(Div(text=f"<h4>{gpu_name_b} Kernels</h4>"), table_gpu_b_combined)
+        ),
+        Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"),
+        row(
+            column(Div(text=f"<h4>{gpu_name_a} Sorted by Latency</h4>"), sorted_table_gpu_a_combined),
+            column(Div(text=f"<h4>{gpu_name_b} Sorted by Latency</h4>"), sorted_table_gpu_b_combined)
+        ),
+        Div(text="<h3>Top 10 Kernels Comparison</h3>"),
+        row(
+            column(Div(text=f"<h4>{gpu_name_a} Top Kernels</h4>"), top_table_gpu_a_combined),
+            column(Div(text=f"<h4>{gpu_name_b} Top Kernels</h4>"), top_table_gpu_b_combined)
+        ),
+    )
+    
+    # Create tabs
+    tab1 = TabPanel(child=gpu_a_layout, title=gpu_name_a)
+    tab2 = TabPanel(child=gpu_b_layout, title=gpu_name_b) 
+    tab3 = TabPanel(child=both_layout, title="Side-by-Side Comparison")
+    
+    tabs = Tabs(tabs=[tab1, tab2, tab3])
+    
+    # Final layout
+    layout = column(               
+        tabs
+    )
+    
+    return layout
 
 def main():
     parser = argparse.ArgumentParser(description='Generate GPU Kernel Profiling Dashboard')
@@ -1380,7 +598,6 @@ def main():
     layout = create_visualization(args.trace1, args.trace2, args.name1, args.name2)
     save(layout)
     print(f"Dashboard saved to {args.output}")
-
 
 if __name__ == "__main__":
     main()

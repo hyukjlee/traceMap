@@ -48,8 +48,8 @@ Specify your own trace files for comparison:
 python3 main.py \
     --trace1 /path/to/first_trace.pt.trace.json.gz \
     --trace2 /path/to/second_trace.pt.trace.json.gz \
-    --name1 "Trace_A_Name" \
-    --name2 "Trace_B_Name" \
+    --name1 "trace1 name" \
+    --name2 "trace2 name" \
     --output custom_dashboard.html
 ```
 

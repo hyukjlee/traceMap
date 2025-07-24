@@ -3,9 +3,11 @@
 This tool generates interactive HTML dashboards for analyzing PyTorch profiler trace files (`.pt.trace.json.gz`) from vLLM workloads. It provides visualization capabilities for GPU kernel profiling and performance analysis.
 ![image](https://github.com/user-attachments/assets/aecef59e-f76b-458f-a515-1e2f2dacbbcc)
 
-### Key Advantages
--Produces a rich, interactive HTML dashboard that lets users explore GPU kernel execution, zoom timelines, and inspect individual events in detail 
--Enables side-by-side comparison of two distinct traces, helping identify performance changes across versions or configurations
+### Features
+- Interactive HTML DashboardGenerate a standalone HTML report to zoom, pan, and inspect individual kernel execution events.
+- Side-by-Side Trace ComparisonCompare two trace files to easily spot regressions or improvements in kernel-level performance.
+- Optimized for LLM InferenceTailored for vLLM traces, with attention to CUDA graph behavior, TTFT (time-to-first-token), and kernel throughput.
+- Lightweight and PortableNo server needed. Outputs a self-contained HTML file viewable in any modern browser.
 
 ## Prerequisites
 

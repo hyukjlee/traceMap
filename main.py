@@ -157,7 +157,7 @@ class TraceAnalyzer:
         # Take first 6 characters as RGB hex color
         return f"#{hash_hex[:6]}"
     
-    def create_top_n_data(self, n=10):
+    def create_top_n_data(self, n=30):
         """Create top N kernels by total latency and counts"""
         kernel_stats = self.df.groupby('Kernel Name').agg({
             'Duration (us)': ['sum', 'count', 'mean']
@@ -1269,11 +1269,11 @@ class DashboardBuilder:
             row(spacer, Div(text=f"<h2>{self.gpu_name_a} Kernel Analysis</h2>")),
             row(spacer, self.control_manager.chart_type_select, self.control_manager.window_size_spinner, self.control_manager.slider_gpu_a),
             row(spacer, gpu_a_chart_container),
-            row(spacer, Div(text="<h3>Kernel Details Table</h3>"), self.table_manager.copy_buttons['gpu_a']),
+            row(spacer, Div(text="<h3>Kernel Details</h3>"), self.table_manager.copy_buttons['gpu_a']),
             row(spacer, self.table_manager.tables['gpu_a']),
             row(spacer, Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"), self.table_manager.copy_buttons['sorted_gpu_a']),
             row(spacer, self.table_manager.tables['sorted_gpu_a']),
-            row(spacer, Div(text="<h3>Top 10 Kernels by Total Duration</h3>"), self.table_manager.copy_buttons['top_gpu_a']),
+            row(spacer, Div(text="<h3>Top N Kernels by Total Duration</h3>"), self.table_manager.copy_buttons['top_gpu_a']),
             row(spacer, self.table_manager.tables['top_gpu_a']),
             row(spacer, Div(text="<h3>Duration Calculator</h3>")),
             row(spacer, self.duration_calculator.kernel_input_a),

@@ -17,7 +17,7 @@ class ChartBuilder:
             y_axis_label="Duration (us)",
             width=width,
             height=400,
-            tools="pan,wheel_zoom,box_zoom,reset,save,tap"
+            tools="reset,tap"
         )
         bars = p.vbar(x='Kernel Index', top='Duration (us)', width=0.8, 
                      source=source_filtered, color=color, alpha=0.7)

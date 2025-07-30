@@ -293,7 +293,7 @@ class GPUTraceDashboard:
     
     def _attach_callbacks(self):
         """Attach all JavaScript callbacks to controls."""
-        # Window size callbacks
+        # Window size callbacks for individual tabs
         window_size_sources = {
             'spinner': self.window_size_spinner,
             'slider_gpu_a': self.slider_gpu_a,
@@ -314,7 +314,26 @@ class GPUTraceDashboard:
         
         self.window_size_spinner.js_on_change('value', window_size_callback)
         
-        # Slider callbacks
+        # Window size callbacks for combined tab
+        window_size_sources_combined = {
+            'spinner': self.window_size_spinner_combined,
+            'slider_gpu_a': self.slider_gpu_a_combined,
+            'slider_gpu_b': self.slider_gpu_b_combined,
+            'source_gpu_a': self.data_sources.source_gpu_a,
+            'source_gpu_b': self.data_sources.source_gpu_b,
+            'source_gpu_a_filtered': self.data_sources.source_gpu_a_combined_filtered,
+            'source_gpu_b_filtered': self.data_sources.source_gpu_b_combined_filtered,
+            'source_sorted_gpu_a_filtered': self.data_sources.source_sorted_gpu_a_combined_filtered,
+            'source_sorted_gpu_b_filtered': self.data_sources.source_sorted_gpu_b_combined_filtered,
+        }
+        
+        window_size_callback_combined = CallbackManager.create_window_size_callback(
+            window_size_sources_combined, {}, gpu_names
+        )
+        
+        self.window_size_spinner_combined.js_on_change('value', window_size_callback_combined)
+        
+        # Slider callbacks for individual tabs
         slider_callback_gpu_a = CallbackManager.create_slider_callback(
             {
                 'source': self.data_sources.source_gpu_a,
@@ -342,7 +361,35 @@ class GPUTraceDashboard:
         self.slider_gpu_a.js_on_change('value', slider_callback_gpu_a)
         self.slider_gpu_b.js_on_change('value', slider_callback_gpu_b)
         
-        # Tap callbacks
+        # Slider callbacks for combined tab
+        slider_callback_gpu_a_combined = CallbackManager.create_slider_callback(
+            {
+                'source': self.data_sources.source_gpu_a,
+                'source_filtered': self.data_sources.source_gpu_a_combined_filtered,
+                'source_sorted_filtered': self.data_sources.source_sorted_gpu_a_combined_filtered,
+            },
+            {
+                'slider': self.slider_gpu_a_combined,
+                'spinner': self.window_size_spinner_combined
+            }
+        )
+        
+        slider_callback_gpu_b_combined = CallbackManager.create_slider_callback(
+            {
+                'source': self.data_sources.source_gpu_b,
+                'source_filtered': self.data_sources.source_gpu_b_combined_filtered,
+                'source_sorted_filtered': self.data_sources.source_sorted_gpu_b_combined_filtered,
+            },
+            {
+                'slider': self.slider_gpu_b_combined,
+                'spinner': self.window_size_spinner_combined
+            }
+        )
+        
+        self.slider_gpu_a_combined.js_on_change('value', slider_callback_gpu_a_combined)
+        self.slider_gpu_b_combined.js_on_change('value', slider_callback_gpu_b_combined)
+        
+        # Tap callbacks for individual tabs
         tap_callback_gpu_a = CallbackManager.create_tap_callback()
         tap_callback_gpu_a.args = dict(
             source=self.data_sources.source_gpu_a_filtered,
@@ -359,6 +406,24 @@ class GPUTraceDashboard:
         
         self.bars_gpu_a.data_source.selected.js_on_change('indices', tap_callback_gpu_a)
         self.bars_gpu_b.data_source.selected.js_on_change('indices', tap_callback_gpu_b)
+        
+        # Tap callbacks for combined tab
+        tap_callback_gpu_a_combined = CallbackManager.create_tap_callback()
+        tap_callback_gpu_a_combined.args = dict(
+            source=self.data_sources.source_gpu_a_combined_filtered,
+            table=self.table_gpu_a_combined,
+            sorted_table=self.sorted_table_gpu_a_combined
+        )
+        
+        tap_callback_gpu_b_combined = CallbackManager.create_tap_callback()
+        tap_callback_gpu_b_combined.args = dict(
+            source=self.data_sources.source_gpu_b_combined_filtered,
+            table=self.table_gpu_b_combined,
+            sorted_table=self.sorted_table_gpu_b_combined
+        )
+        
+        self.bars_gpu_a_combined.data_source.selected.js_on_change('indices', tap_callback_gpu_a_combined)
+        self.bars_gpu_b_combined.data_source.selected.js_on_change('indices', tap_callback_gpu_b_combined)
     
     def _create_layouts(self):
         """Create the layout for each tab."""

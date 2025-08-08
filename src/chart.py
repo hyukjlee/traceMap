@@ -1,6 +1,6 @@
 import pandas as pd
 from bokeh.plotting import figure
-from bokeh.models import DataTable, TableColumn, NumberFormatter, CustomJS, Spinner, Slider, Div
+from bokeh.models import DataTable, TableColumn, NumberFormatter, CustomJS, Spinner, Slider, Div, Button
 from bokeh.layouts import column, row
 from bokeh.models import Tabs, TabPanel
 from src.data import TraceDataProcessor, DataSourceManager
@@ -65,26 +65,10 @@ class TableBuilder:
         columns = TableBuilder.create_top_n_table_columns()
         return DataTable(source=source, columns=columns, width=width, height=600, index_position=None)
 
-
-class ControlsBuilder:
-    """Builds UI controls like sliders and spinners."""
-    
     @staticmethod
-    def create_window_size_spinner(default_value=100):
-        """Create a spinner for window size control."""
-        return Spinner(title="Window Size:", low=10, high=1000, step=10, value=default_value, width=150)
-    
-    @staticmethod
-    def create_slider(df_length, window_size, gpu_name, width=1000):
-        """Create a slider for sliding window control."""
-        return Slider(
-            start=0, 
-            end=max(0, df_length - window_size), 
-            value=0, 
-            step=window_size, 
-            title=f"{gpu_name} Kernel Index Window (showing {window_size} at a time)", 
-            width=width
-        )
+    def create_copy_button(label="Copy Table Data"):
+        """Create a copy button for table data."""
+        return Button(label=label, button_type="primary", width=150)
 
 
 class CallbackManager:
@@ -112,6 +96,67 @@ class CallbackManager:
         }
         """
     
+    @staticmethod
+    def create_copy_callback(source, table_type="kernel"):
+        """Create callback for copying table data to clipboard."""
+        if table_type == "kernel":
+            return CustomJS(args=dict(source=source), code="""
+                const data = source.data;
+                let csv_content = "Index,Kernel Name,Start (μs),Duration (μs),End (μs)\\n";
+                
+                const length = data['Kernel Index'].length;
+                for (let i = 0; i < length; i++) {
+                    const row = [
+                        data['Kernel Index'][i],
+                        '"' + data['Kernel Name'][i].replace(/"/g, '""') + '"',
+                        data['Start (us)'][i].toFixed(3),
+                        data['Duration (us)'][i].toFixed(3),
+                        data['End (us)'][i].toFixed(3)
+                    ].join(',');
+                    csv_content += row + "\\n";
+                }
+                
+                navigator.clipboard.writeText(csv_content).then(function() {
+                    console.log('Table data copied to clipboard');
+                    // Show temporary feedback
+                    const button = cb_obj;
+                    const original_label = button.label;
+                    button.label = "Copied!";
+                    setTimeout(() => { button.label = original_label; }, 2000);
+                }).catch(function(err) {
+                    console.error('Could not copy text: ', err);
+                    alert('Failed to copy data. Please check browser permissions.');
+                });
+            """)
+        elif table_type == "top_n":
+            return CustomJS(args=dict(source=source), code="""
+                const data = source.data;
+                let csv_content = "Kernel Name,Total Duration (μs),Count,Avg Duration (μs)\\n";
+                
+                const length = data['Kernel Name'].length;
+                for (let i = 0; i < length; i++) {
+                    const row = [
+                        '"' + data['Kernel Name'][i].replace(/"/g, '""') + '"',
+                        data['Total Duration (us)'][i].toFixed(3),
+                        data['Count'][i],
+                        data['Avg Duration (us)'][i].toFixed(3)
+                    ].join(',');
+                    csv_content += row + "\\n";
+                }
+                
+                navigator.clipboard.writeText(csv_content).then(function() {
+                    console.log('Table data copied to clipboard');
+                    // Show temporary feedback
+                    const button = cb_obj;
+                    const original_label = button.label;
+                    button.label = "Copied!";
+                    setTimeout(() => { button.label = original_label; }, 2000);
+                }).catch(function(err) {
+                    console.error('Could not copy text: ', err);
+                    alert('Failed to copy data. Please check browser permissions.');
+                });
+            """)
+
     @staticmethod
     def create_window_size_callback(sources, controls, gpu_names):
         """Create callback for window size changes."""
@@ -203,6 +248,34 @@ class CallbackManager:
         )
 
 
+class ControlsBuilder:
+    """Builds control widgets for the dashboard."""
+    
+    @staticmethod
+    def create_window_size_spinner(default_value):
+        """Create a spinner for window size control."""
+        return Spinner(
+            title="Window Size:",
+            low=10,
+            high=1000,
+            step=10,
+            value=default_value,
+            width=200
+        )
+    
+    @staticmethod
+    def create_slider(data_length, window_size, gpu_name, width=2000):
+        """Create a slider for kernel index window."""
+        return Slider(
+            start=0,
+            end=max(0, data_length - window_size),
+            value=0,
+            step=window_size,
+            title=f"{gpu_name} Kernel Index Window (showing {window_size} at a time)",
+            width=width
+        )
+
+
 class GPUTraceDashboard:
     """Main class that orchestrates the creation of the GPU trace dashboard."""
     
@@ -285,11 +358,11 @@ class GPUTraceDashboard:
         self.window_size_spinner = ControlsBuilder.create_window_size_spinner(self.default_window_size)
         self.window_size_spinner_combined = ControlsBuilder.create_window_size_spinner(self.default_window_size)
         
-        # Sliders
-        self.slider_gpu_a = ControlsBuilder.create_slider(len(self.df_gpu_a), self.default_window_size, self.gpu_name_a)
-        self.slider_gpu_b = ControlsBuilder.create_slider(len(self.df_gpu_b), self.default_window_size, self.gpu_name_b)
-        self.slider_gpu_a_combined = ControlsBuilder.create_slider(len(self.df_gpu_a), self.default_window_size, self.gpu_name_a)
-        self.slider_gpu_b_combined = ControlsBuilder.create_slider(len(self.df_gpu_b), self.default_window_size, self.gpu_name_b)
+        # Sliders - match the width of the charts
+        self.slider_gpu_a = ControlsBuilder.create_slider(len(self.df_gpu_a), self.default_window_size, self.gpu_name_a, width=2000)
+        self.slider_gpu_b = ControlsBuilder.create_slider(len(self.df_gpu_b), self.default_window_size, self.gpu_name_b, width=2000)
+        self.slider_gpu_a_combined = ControlsBuilder.create_slider(len(self.df_gpu_a), self.default_window_size, self.gpu_name_a, width=1000)
+        self.slider_gpu_b_combined = ControlsBuilder.create_slider(len(self.df_gpu_b), self.default_window_size, self.gpu_name_b, width=1000)
     
     def _attach_callbacks(self):
         """Attach all JavaScript callbacks to controls."""
@@ -425,6 +498,42 @@ class GPUTraceDashboard:
         self.bars_gpu_a_combined.data_source.selected.js_on_change('indices', tap_callback_gpu_a_combined)
         self.bars_gpu_b_combined.data_source.selected.js_on_change('indices', tap_callback_gpu_b_combined)
     
+    def _create_copy_buttons(self):
+        """Create copy buttons for all tables."""
+        # Individual tab copy buttons
+        self.copy_btn_gpu_a = TableBuilder.create_copy_button(f"Copy {self.gpu_name_a} Table")
+        self.copy_btn_gpu_b = TableBuilder.create_copy_button(f"Copy {self.gpu_name_b} Table")
+        self.copy_btn_sorted_gpu_a = TableBuilder.create_copy_button(f"Copy {self.gpu_name_a} Sorted")
+        self.copy_btn_sorted_gpu_b = TableBuilder.create_copy_button(f"Copy {self.gpu_name_b} Sorted")
+        self.copy_btn_top_gpu_a = TableBuilder.create_copy_button(f"Copy {self.gpu_name_a} Top")
+        self.copy_btn_top_gpu_b = TableBuilder.create_copy_button(f"Copy {self.gpu_name_b} Top")
+        
+        # Combined tab copy buttons
+        self.copy_btn_gpu_a_combined = TableBuilder.create_copy_button(f"Copy {self.gpu_name_a}")
+        self.copy_btn_gpu_b_combined = TableBuilder.create_copy_button(f"Copy {self.gpu_name_b}")
+        self.copy_btn_sorted_gpu_a_combined = TableBuilder.create_copy_button(f"Copy {self.gpu_name_a} Sorted")
+        self.copy_btn_sorted_gpu_b_combined = TableBuilder.create_copy_button(f"Copy {self.gpu_name_b} Sorted")
+        self.copy_btn_top_gpu_a_combined = TableBuilder.create_copy_button(f"Copy {self.gpu_name_a} Top")
+        self.copy_btn_top_gpu_b_combined = TableBuilder.create_copy_button(f"Copy {self.gpu_name_b} Top")
+    
+    def _attach_copy_callbacks(self):
+        """Attach copy callbacks to all copy buttons."""
+        # Individual tab copy callbacks
+        self.copy_btn_gpu_a.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_gpu_a_filtered, "kernel"))
+        self.copy_btn_gpu_b.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_gpu_b_filtered, "kernel"))
+        self.copy_btn_sorted_gpu_a.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_sorted_gpu_a_filtered, "kernel"))
+        self.copy_btn_sorted_gpu_b.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_sorted_gpu_b_filtered, "kernel"))
+        self.copy_btn_top_gpu_a.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_top_gpu_a, "top_n"))
+        self.copy_btn_top_gpu_b.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_top_gpu_b, "top_n"))
+        
+        # Combined tab copy callbacks
+        self.copy_btn_gpu_a_combined.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_gpu_a_combined_filtered, "kernel"))
+        self.copy_btn_gpu_b_combined.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_gpu_b_combined_filtered, "kernel"))
+        self.copy_btn_sorted_gpu_a_combined.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_sorted_gpu_a_combined_filtered, "kernel"))
+        self.copy_btn_sorted_gpu_b_combined.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_sorted_gpu_b_combined_filtered, "kernel"))
+        self.copy_btn_top_gpu_a_combined.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_top_gpu_a, "top_n"))
+        self.copy_btn_top_gpu_b_combined.js_on_click(CallbackManager.create_copy_callback(self.data_sources.source_top_gpu_b, "top_n"))
+    
     def _create_layouts(self):
         """Create the layout for each tab."""
         # GPU A layout
@@ -433,10 +542,13 @@ class GPUTraceDashboard:
             row(self.window_size_spinner, self.slider_gpu_a),
             self.chart_gpu_a,
             Div(text="<h3>Kernel Details</h3>"),
+            self.copy_btn_gpu_a,
             self.table_gpu_a,
             Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"),
+            self.copy_btn_sorted_gpu_a,
             self.sorted_table_gpu_a,
             Div(text="<h3>Top 10 Kernels by Total Duration</h3>"),
+            self.copy_btn_top_gpu_a,
             self.top_table_gpu_a
         )
         
@@ -446,10 +558,13 @@ class GPUTraceDashboard:
             row(self.window_size_spinner, self.slider_gpu_b),
             self.chart_gpu_b,
             Div(text="<h3>Kernel Details</h3>"),
+            self.copy_btn_gpu_b,
             self.table_gpu_b,
             Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"),
+            self.copy_btn_sorted_gpu_b,
             self.sorted_table_gpu_b,
             Div(text="<h3>Top 10 Kernels by Total Duration</h3>"),
+            self.copy_btn_top_gpu_b,
             self.top_table_gpu_b
         )
         
@@ -461,18 +576,42 @@ class GPUTraceDashboard:
             row(self.chart_gpu_a_combined, self.chart_gpu_b_combined),
             Div(text="<h3>Kernel Details</h3>"),
             row(
-                column(Div(text=f"<h4>{self.gpu_name_a} Kernels</h4>"), self.table_gpu_a_combined),
-                column(Div(text=f"<h4>{self.gpu_name_b} Kernels</h4>"), self.table_gpu_b_combined)
+                column(
+                    Div(text=f"<h4>{self.gpu_name_a} Kernels</h4>"), 
+                    self.copy_btn_gpu_a_combined,
+                    self.table_gpu_a_combined
+                ),
+                column(
+                    Div(text=f"<h4>{self.gpu_name_b} Kernels</h4>"), 
+                    self.copy_btn_gpu_b_combined,
+                    self.table_gpu_b_combined
+                )
             ),
             Div(text="<h3>Kernels Sorted by Latency (Current Window)</h3>"),
             row(
-                column(Div(text=f"<h4>{self.gpu_name_a} Sorted by Latency</h4>"), self.sorted_table_gpu_a_combined),
-                column(Div(text=f"<h4>{self.gpu_name_b} Sorted by Latency</h4>"), self.sorted_table_gpu_b_combined)
+                column(
+                    Div(text=f"<h4>{self.gpu_name_a} Sorted by Latency</h4>"), 
+                    self.copy_btn_sorted_gpu_a_combined,
+                    self.sorted_table_gpu_a_combined
+                ),
+                column(
+                    Div(text=f"<h4>{self.gpu_name_b} Sorted by Latency</h4>"), 
+                    self.copy_btn_sorted_gpu_b_combined,
+                    self.sorted_table_gpu_b_combined
+                )
             ),
             Div(text="<h3>Top 30 Kernels Comparison</h3>"),
             row(
-                column(Div(text=f"<h4>{self.gpu_name_a} Top Kernels</h4>"), self.top_table_gpu_a_combined),
-                column(Div(text=f"<h4>{self.gpu_name_b} Top Kernels</h4>"), self.top_table_gpu_b_combined)
+                column(
+                    Div(text=f"<h4>{self.gpu_name_a} Top Kernels</h4>"), 
+                    self.copy_btn_top_gpu_a_combined,
+                    self.top_table_gpu_a_combined
+                ),
+                column(
+                    Div(text=f"<h4>{self.gpu_name_b} Top Kernels</h4>"), 
+                    self.copy_btn_top_gpu_b_combined,
+                    self.top_table_gpu_b_combined
+                )
             ),
         )
     
@@ -481,7 +620,9 @@ class GPUTraceDashboard:
         self._create_charts()
         self._create_tables()
         self._create_controls()
+        self._create_copy_buttons()
         self._attach_callbacks()
+        self._attach_copy_callbacks()
         self._create_layouts()
         
         # Create tabs

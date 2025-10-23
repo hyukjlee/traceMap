@@ -9,9 +9,12 @@ class TraceDataProcessor:
     @staticmethod
     def extract_kernel_data(trace_path):
         """Extract kernel data from a trace file."""
-        with gzip.open(trace_path, 'rt', encoding='utf-8') as f:
-            trace_data = json.load(f)
-        
+        try:
+            with gzip.open(trace_path, 'rt', encoding='utf-8') as f:
+                trace_data = json.load(f)
+        except (gzip.BadGzipFile, OSError):
+            with open(trace_path, 'r', encoding='utf-8') as f:
+                trace_data = json.load(f)
         events = trace_data.get("traceEvents", [])
         kernel_events = []
         

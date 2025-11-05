@@ -633,3 +633,15 @@ class GPUTraceDashboard:
         tabs = Tabs(tabs=[tab1, tab2, tab3])
         
         return column(tabs)
+
+    def export_csv_report(self, output_path, unique_kernel_file=None, total_layers=None):
+        """Export kernel data to a multi-sheet spreadsheet."""
+        return TraceDataProcessor.export_kernel_report(
+            self.df_gpu_a,
+            self.df_gpu_b,
+            self.gpu_name_a,
+            self.gpu_name_b,
+            output_path,
+            unique_kernel_file=unique_kernel_file,
+            total_layers=total_layers,
+        )

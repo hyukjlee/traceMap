@@ -1,6 +1,5 @@
 import argparse
-import pandas as pd
-from bokeh.plotting import figure, save, output_file
+from bokeh.plotting import save, output_file
 from src.chart import GPUTraceDashboard
 import datetime
 
@@ -17,6 +16,10 @@ def main():
     
     parser.add_argument('--output', default="tm.html",
                        help='Output HTML file name (default: tm_{timestamp}.html)')
+    parser.add_argument('--csv',
+                       help='Optional path for CSV/XLSX export with detailed kernel data')
+    parser.add_argument('--layers', type=int,
+                       help='Expected number of repeated layers to prioritize (e.g., 36)')
     
     args = parser.parse_args()
     
@@ -24,12 +27,20 @@ def main():
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     output_filename = args.output.replace('.html', f'_{timestamp}.html')
     
-   # Create and save the visualization
+    # Create and save the visualization
     output_file(output_filename, title="GPU Kernel Profiling Dashboard")
     dashboard = GPUTraceDashboard(args.trace1, args.trace2, args.name1, args.name2)
     layout = dashboard.create_visualization()
     save(layout)
     print(f"Dashboard saved to {output_filename}")
+
+    if args.csv:
+        csv_path = dashboard.export_csv_report(
+            args.csv,
+            unique_kernel_file="unique_kernels.txt",
+            total_layers=args.layers
+        )
+        print(f"CSV report saved to {csv_path}")
 
 if __name__ == "__main__":
     main()

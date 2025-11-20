@@ -1,7 +1,15 @@
 import argparse
+import datetime
+from pathlib import Path
 from bokeh.plotting import save, output_file
 from src.chart import GPUTraceDashboard
-import datetime
+
+
+# Ensure traceMap outputs land under the shared benchNap directory
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BENCHNAP_DIR = PROJECT_ROOT / "benchNap"
+TRACE_OUTPUT_DIR = BENCHNAP_DIR / "trace_outputs"
+TRACE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def main():
     parser = argparse.ArgumentParser(description='Generate GPU Kernel Profiling Dashboard')
@@ -25,18 +33,22 @@ def main():
     
     # Add timestamp to output filename
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_filename = args.output.replace('.html', f'_{timestamp}.html')
+    base_output = Path(args.output)
+    output_filename = TRACE_OUTPUT_DIR / f"{base_output.stem}_{timestamp}.html"
     
     # Create and save the visualization
-    output_file(output_filename, title="GPU Kernel Profiling Dashboard")
+    output_file(str(output_filename), title="GPU Kernel Profiling Dashboard")
     dashboard = GPUTraceDashboard(args.trace1, args.trace2, args.name1, args.name2)
     layout = dashboard.create_visualization()
     save(layout)
     print(f"Dashboard saved to {output_filename}")
 
     if args.csv:
+        csv_basename = Path(args.csv)
+        csv_suffix = csv_basename.suffix or ".xlsx"
+        csv_output = TRACE_OUTPUT_DIR / f"{csv_basename.stem}_{timestamp}{csv_suffix}"
         csv_path = dashboard.export_csv_report(
-            args.csv,
+            csv_output,
             unique_kernel_file="unique_kernels.txt",
             total_layers=args.layers
         )
